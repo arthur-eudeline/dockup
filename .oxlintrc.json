@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "extends": [
+    "./node_modules/ultracite/config/oxlint/core/.oxlintrc.json",
+    "./node_modules/ultracite/config/oxlint/vitest/.oxlintrc.json",
+  ],
+  "rules": {
+    "func-names": ["warn", "as-needed"],
+    "func-style": ["off"],
+    "no-use-before-define": ["off"],
+    "no-inferrable-types": ["off"],
+    "curly": ["off"],
+    "sort-keys": ["off"],
+  },
+}

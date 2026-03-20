@@ -1,0 +1,91 @@
+services:
+  # RustFS main service
+  rustfs:
+    image: rustfs/rustfs:latest
+    ports:
+      - "9000:9000" # S3 API port
+      - "9001:9001" # Console port
+    environment:
+      - RUSTFS_VOLUMES=/data/rustfs{0..3} # Define 4 storage volumes
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      - RUSTFS_CONSOLE_ENABLE=true
+      - RUSTFS_CORS_ALLOWED_ORIGINS=*
+      - RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS=*
+      - RUSTFS_ACCESS_KEY=rustfsadmin
+      - RUSTFS_SECRET_KEY=rustfsadmin
+      - RUSTFS_OBS_LOGGER_LEVEL=info
+      - RUSTFS_TLS_PATH=/opt/tls
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "sh",
+          "-c",
+          "curl -f http://127.0.0.1:9000/health && curl -f http://127.0.0.1:9001/rustfs/console/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:alpine
+    volumes:
+      - ./seeds/postgres/small.sql:/docker-entrypoint-initdb.d/small.sql:ro
+      # - ./seeds/postgres/big.sql:/docker-entrypoint-initdb.d/big.sql:ro
+    labels:
+      - "dockup.backup.enabled=true"
+      - "dockup.backup.type=postgres"
+      - "dockup.backup.name=postgres-backup"
+    environment:
+      POSTGRES_DB: ${DB_NAME?:error}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/DB_PASSWORD
+    secrets:
+      - DB_PASSWORD
+
+  wordpress:
+    image: wordpress:6.9-php8.2-apache
+    restart: always
+    labels:
+      - "dockup.backup.enabled=true"
+      - "dockup.backup.type=volumes"
+      - "dockup.backup.name=nevers-et-vous-wp"
+    depends_on:
+      - mariadb
+    ports:
+      - 8080:80
+    environment:
+      WORDPRESS_DB_HOST: mariadb
+      WORDPRESS_DB_USER: ${DB_USER?:error}
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/DB_PASSWORD
+      WORDPRESS_DB_NAME: ${DB_NAME?:error}
+    secrets:
+      - DB_PASSWORD
+    volumes:
+      - ./wordpress:/var/www/html
+      - ./logs:/var/log/apache2/
+
+  mariadb:
+    image: mariadb:12
+    volumes:
+      - ./seeds/mariadb/small.sql:/docker-entrypoint-initdb.d/small.sql:ro
+    ports:
+      - 3306:3306
+    labels:
+      - "dockup.backup.enabled=true"
+      - "dockup.backup.type=mariadb"
+      - "dockup.backup.name=mariadb-backup"
+    environment:
+      MARIADB_DATABASE: ${DB_NAME?:error}
+      MARIADB_USER: ${DB_USER?:error}
+      MYSQL_PASSWORD_FILE: /run/secrets/DB_PASSWORD
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    secrets:
+      - DB_PASSWORD
+
+secrets:
+  DB_PASSWORD:
+    environment: DB_PASSWORD
