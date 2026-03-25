@@ -1,26 +1,32 @@
-import { homedir } from "node:os";
-
-import { $ } from "bun";
+import { $, spawn } from "bun";
+import chalk from "chalk";
 import { Effect } from "effect";
 import { z } from "zod";
 
 import type { Config } from "./config";
 import { ConfigTag } from "./effect";
-import { ParsingError, ShellCommandFailureError } from "./errors";
+import { ParsingError, ShellCommandFailureError, ResticRepoNotInitializedError } from "./errors";
 import { formatBytes, formatDuration, formatHumanDate } from "./utils";
+
+// oxlint-disable-next-line typescript/consistent-type-definitions
+export type ResticConf = {
+  AWS_ACCESS_KEY_ID: string;
+  AWS_SECRET_ACCESS_KEY: string;
+  RESTIC_PASSWORD: string;
+  RESTIC_REPOSITORY: string;
+};
 
 /**
  * Converts the dockup configuration to restic required environment variables
  * @param config The dockup config object
  * @returns The restic environment variables
  */
-export const configToResticEnv = (config: Config) =>
+export const configToResticEnv = (config: Config): Effect.Effect<ResticConf> =>
   Effect.succeed({
     AWS_ACCESS_KEY_ID: config.AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY: config.AWS_SECRET_ACCESS_KEY,
     RESTIC_PASSWORD: config.RESTIC_PASSWORD,
     RESTIC_REPOSITORY: config.RESTIC_REPOSITORY,
-    HOME: homedir(),
   });
 
 /**
@@ -115,6 +121,7 @@ export interface ResticCleanUpStructuredOutput {
  */
 export type ResticStructuredOutput =
   | ResticSuccessfulBackupStructuredOutput
+  | ResticSuccessfulVolumeBackupStructuredOutput
   | ResticFailedBackupStructuredOutput
   | ResticCleanUpStructuredOutput;
 
@@ -248,4 +255,43 @@ export const listSnapshots = (
     });
 
     return yield* parseResticSnapshotListOutput(output);
+  });
+
+export const ensureRepoInitialized = (): Effect.Effect<
+  void,
+  ShellCommandFailureError | ResticRepoNotInitializedError,
+  ConfigTag
+> =>
+  Effect.gen(function* _ensureRepoInitialized() {
+    const config = yield* ConfigTag;
+    const env = yield* configToResticEnv(config);
+
+    return yield* Effect.tryPromise({
+      try: async () => {
+        const proc = spawn({
+          cmd: ["restic", "snapshots"],
+          env: { ...process.env, ...env },
+          timeout: 5000,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+
+        await proc.exited;
+        if (proc.exitCode !== 0) {
+          throw new ResticRepoNotInitializedError({
+            cause: "",
+            message: `Restic distant repository does not seems to be initialized.\nTo initialize it, run the following command ${chalk.yellow("dockup restic init")}`,
+          });
+        }
+      },
+      catch: (e) => {
+        if (e instanceof ResticRepoNotInitializedError) {
+          return e;
+        }
+        return new ShellCommandFailureError({
+          cause: e,
+          message: "restic repo initialization command failed (restic snapshots)",
+        });
+      },
+    });
   });

@@ -1,6 +1,8 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
+// oxlint-disable prefer-destructuring
+import { exists } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
+import { $ } from "bun";
 import { Effect } from "effect";
 import { z } from "zod";
 
@@ -10,7 +12,7 @@ import { ConfigurationRetrievalError, InvalidConfigurationError } from "./errors
 /**
  * The dockup configuration path
  */
-export const configPath = join(homedir(), ".dockup-config");
+export const configPath = join("/etc/dockup.conf");
 const configFile = Bun.file(configPath);
 
 /**
@@ -48,10 +50,10 @@ export const validateConfig = (payload: unknown): Effect.Effect<Config, InvalidC
  */
 export const readConfig: Effect.Effect<Config, ConfigurationRetrievalError | InvalidConfigurationError, never> =
   Effect.gen(function* readConfig() {
-    const exists = yield* Effect.promise(() => configFile.exists());
+    const _exists = yield* Effect.promise(() => configFile.exists());
 
     // Error if not exists
-    if (!exists) return yield* Effect.fail(new ConfigurationRetrievalError({ configPath, cause: "FILE_NOT_FOUND" }));
+    if (!_exists) return yield* Effect.fail(new ConfigurationRetrievalError({ configPath, cause: "FILE_NOT_FOUND" }));
 
     // Attempt to decrypt it
     const data = yield* Effect.tryPromise({
@@ -68,4 +70,8 @@ export const readConfig: Effect.Effect<Config, ConfigurationRetrievalError | Inv
  * @param config The configuration payload
  */
 export const writeConfig = (config: Config): Effect.Effect<void, never, never> =>
-  Effect.promise(() => encryptFile(configPath, JSON.stringify(config)));
+  Effect.promise(async () => {
+    const dir = dirname(configPath);
+    if (!(await exists(dir))) await $`mkdir -p ${dir}`;
+    await encryptFile(configPath, JSON.stringify(config));
+  });

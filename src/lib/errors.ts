@@ -43,3 +43,21 @@ export class ConfigurationRetrievalError extends Data.TaggedError("CONFIGURATION
     return `Cannot decrypt the dockup configuration file stored at ${this.configPath}. Please re-generate one via the commande "dockup config set"`;
   }
 }
+
+export class FileSystemPermissionError extends Data.TaggedError("FILE_SYSTEM_PERMISSION_ERROR")<{
+  path: string;
+}> {
+  override get message() {
+    return `You don't have the write permission to create the config file at ${this.path}`;
+  }
+}
+
+export class ResticRepoNotInitializedError extends Data.TaggedError("RESTIC_REPO_NOT_INITIALIZED_ERROR")<{
+  cause: unknown;
+  message: string;
+}> {}
+
+export class PermissionError extends Data.TaggedError("PERMISSION_ERROR")<{
+  cause: unknown;
+  message: string;
+}> {}

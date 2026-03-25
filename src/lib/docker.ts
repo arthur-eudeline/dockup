@@ -2,8 +2,9 @@ import { $ } from "bun";
 import { Effect } from "effect";
 import { z } from "zod";
 
-import type { ShellCommandFailureError } from "./errors";
-import { ContainerBackupInfosParsingError, ParsingError } from "./errors";
+import type { ShellCommandFailureError, ContainerBackupInfosParsingError } from "./errors";
+import { ParsingError, PermissionError, UndefinedVariableError } from "./errors";
+import type { ResticConf } from "./restic";
 import { getShellOutput } from "./utils";
 
 /**
@@ -25,16 +26,6 @@ export const listBackupEnabledContainerIds = (): Effect.Effect<string[], Parsing
     const result = yield* getShellOutput(
       `docker ps --filter "label=${LABELS.BACKUP_ENABLED}=true" --format {{.ID}}`
     ).pipe(Effect.map((r) => r.split("\n")));
-
-    // docker inspect --format='{"Id":"{{.Id}}", "Name":"{{.Name}}", "Image":"{{.Config.Image}}"}'
-    // `docker inspect --format '{{ index .Config.Labels "${LABELS.BACKUP_NAME}" }}' ${containerId}`
-    // yield* Effect.promise(
-    //   () =>
-    //     // $`docker inspect --format='{"id":"{{.Id}}", "name":"{{.Name}}", "volumes": "{{json .Mounts}}", "backupType" : "{{index .Config.Labels \"${LABELS.BACKUP_ENABLED}\" }}" }' 4c58b0c3045adc19c2e65879dd3ed344317260b488cf6a0a70e9a6318450f8bc`
-    //     $`docker inspect --format='{{json .}}' 4c58b0c3045adc19c2e65879dd3ed344317260b488cf6a0a70e9a6318450f8bc`
-    // );
-    // {{ index .Config.Labels "${LABELS.BACKUP_NAME}"
-    // {{ index .Config.Labels "${LABELS.BACKUP_TYPE}"
 
     const { data, error } = z.string().array().safeParse(result);
 
@@ -78,27 +69,30 @@ export type ContainerBackupConfig = z.infer<typeof CONTAINER_BACKUP_CONFIG_SCHEM
  */
 const getContainerBackupConfig = (
   containerId: string
-): Effect.Effect<ContainerBackupConfig, ShellCommandFailureError | ContainerBackupInfosParsingError, never> =>
+): Effect.Effect<ContainerBackupConfig, ShellCommandFailureError | ParsingError, never> =>
   Effect.gen(function* _getContainerBackupInfos() {
     // Gets the backupName and type
-    const [backupName, type] = yield* Effect.all(
-      [
-        getShellOutput(`docker inspect --format '{{ index .Config.Labels "${LABELS.BACKUP_NAME}" }}' ${containerId}`),
-        getShellOutput(`docker inspect --format '{{ index .Config.Labels "${LABELS.BACKUP_TYPE}" }}' ${containerId}`),
-      ],
-      { concurrency: "unbounded" }
-    );
+    const output = yield* getShellOutput(`docker inspect --format '{{ json .Config.Labels }}' ${containerId}`);
+    const json = yield* Effect.try({
+      try: () => JSON.parse(output),
+      catch: () =>
+        new ParsingError({
+          cause: "INVALID_JSON",
+          message: "Failed to parse the docker labels JSON output",
+        }),
+    });
 
     // Validate the retrieved infos
     const { data, error } = CONTAINER_BACKUP_CONFIG_SCHEMA.safeParse({
       id: containerId,
-      backupName,
-      type,
+      backupName: json["dockup.backup.name"],
+      type: json["dockup.backup.type"],
     });
 
     if (error)
       return yield* Effect.fail(
-        new ContainerBackupInfosParsingError({
+        new ParsingError({
+          cause: error,
           message: `The dockup container labels are invalid for the container #\`${containerId}\` :\n${z.prettifyError(error)}`,
         })
       );
@@ -125,4 +119,140 @@ export const listBackupEnabledContainers = (): Effect.Effect<
     );
 
     return yield* Effect.succeed(containersInfos);
+  });
+
+export const ensureDockerPermissions = () =>
+  Effect.tryPromise({
+    try: () => $`docker ps`.quiet(),
+    catch: (e) =>
+      new PermissionError({
+        cause: e,
+        message: "You don't have the permission to use the docker commands",
+      }),
+  });
+
+const VOLUME_SCHEMA = z.discriminatedUnion("Type", [
+  z.object({
+    Type: z.literal("bind"),
+    Source: z.string(),
+    Destination: z.string(),
+    RW: z.boolean(),
+  }),
+  z.object({
+    Type: z.literal("volume"),
+    Name: z.string(),
+    Source: z.string(),
+    Destination: z.string(),
+    RW: z.boolean(),
+  }),
+]);
+
+export type VolumeData = z.infer<typeof VOLUME_SCHEMA>;
+
+export const getContainerVolumes = (
+  containerId: string
+): Effect.Effect<VolumeData[], ShellCommandFailureError | ParsingError, never> =>
+  Effect.gen(function* _getContainerVolumes() {
+    const output = yield* getShellOutput(`docker inspect --format='{{json .Mounts}}' ${containerId}`);
+
+    const json = yield* Effect.try({
+      try: () => JSON.parse(output),
+      catch: (e) =>
+        new ParsingError({
+          cause: e,
+          message: "The docker inspect command did not returned a valid JSON",
+        }),
+    });
+
+    const { data, error } = z.array(VOLUME_SCHEMA).safeParse(json);
+    if (error) {
+      return yield* Effect.fail(
+        new ParsingError({
+          cause: error,
+          message: `The docker volume data are invalid :\n${z.prettifyError(error)}`,
+        })
+      );
+    }
+
+    return data;
+  });
+
+export const formatVolumeToArgs = (volumes: VolumeData[]): Effect.Effect<string> =>
+  Effect.succeed(
+    volumes
+      .map((v) => {
+        if (v.Type === "volume") {
+          return `-v ${v.Name}:${v.Destination}:rw`;
+        }
+
+        return `-v ${v.Source}:${v.Destination}:rw`;
+      })
+      .join(" ")
+  );
+
+export const formatResticConfigToEnvArgs = (conf: ResticConf): Effect.Effect<string> =>
+  Effect.succeed(
+    [
+      `-e AWS_ACCESS_KEY_ID=${conf.AWS_ACCESS_KEY_ID}`,
+      `-e AWS_SECRET_ACCESS_KEY=${conf.AWS_SECRET_ACCESS_KEY}`,
+      `-e RESTIC_PASSWORD=${conf.RESTIC_PASSWORD}`,
+      `-e RESTIC_REPOSITORY=${conf.RESTIC_REPOSITORY.replace("localhost", "host.docker.internal")}`,
+    ].join(" ")
+  );
+
+/**
+ * Gets an environment variable from a Docker container
+ *
+ * @param containerId The container ID to retrieve the variable from
+ * @param variable The variable name to extract
+ * @param file If the value is stored inside a file (e.g. when using docker secrets)
+ *
+ * @returns The variable value
+ */
+export const getContainerEnvVariables = (
+  containerId: string
+): Effect.Effect<Record<string, string>, ShellCommandFailureError | UndefinedVariableError | ParsingError> =>
+  Effect.gen(function* _getContainerEnvVariable() {
+    const result = yield* getShellOutput(`docker exec ${containerId} env`);
+    return yield* Effect.try({
+      try: () =>
+        Object.fromEntries(
+          result.split("\n").map((line) => {
+            const [key, ...value] = line.split("=");
+            return [key, value.join("=")];
+          })
+        ),
+      catch: (e) =>
+        new ParsingError({
+          cause: e,
+          message: "Failed to parse env from shell output",
+        }),
+    });
+  });
+
+/**
+ * Gets an environment variable from a Docker container
+ *
+ * @param containerId The container ID to retrieve the variable from
+ * @param variable The variable name to extract
+ * @param file If the value is stored inside a file (e.g. when using docker secrets)
+ *
+ * @returns The variable value
+ */
+export const getContainerEnvVariable = (
+  containerId: string,
+  source: Record<string, string>,
+  variable: string,
+  file = false
+): Effect.Effect<string, ShellCommandFailureError | UndefinedVariableError> =>
+  Effect.gen(function* _getContainerEnvVariable() {
+    let result = source[variable];
+    if (!result) return yield* Effect.fail(new UndefinedVariableError({ variable: variable }));
+
+    // If the variable is stored in a file (e.g. with docker secrets) reads the file
+    if (result && file) {
+      result = yield* getShellOutput(`docker exec ${containerId} cat ${result}`);
+    }
+
+    return result;
   });

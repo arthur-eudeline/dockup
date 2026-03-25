@@ -1,7 +1,10 @@
+import { dirname } from "node:path";
+
+// oxlint-disable prefer-destructuring
 import { $ } from "bun";
 import { Effect } from "effect";
 
-import { UndefinedVariableError, ShellCommandFailureError } from "./errors";
+import { UndefinedVariableError, ShellCommandFailureError, FileSystemPermissionError } from "./errors";
 
 /**
  * Executes a shell command and returns its output trimed
@@ -52,44 +55,6 @@ export const streamShellOutput = (args: StreamShellOutputArgs): Effect.Effect<st
 
     args.onSuccess?.();
     return yield* Effect.succeed(output.join("\n"));
-  });
-
-/**
- * Gets an environment variable from a Docker container
- *
- * @param containerId The container ID to retrieve the variable from
- * @param variable The variable name to extract
- * @param file If the value is stored inside a file (e.g. when using docker secrets)
- *
- * @returns The variable value
- */
-export const getContainerEnvVariable = (
-  containerId: string,
-  variable: string,
-  file = false
-): Effect.Effect<string, ShellCommandFailureError | UndefinedVariableError> =>
-  Effect.gen(function* _getContainerEnvVariable() {
-    let result = yield* getShellOutput(`docker exec ${containerId} printenv ${variable}`).pipe(
-      Effect.catchAll((e): Effect.Effect<never, UndefinedVariableError | ShellCommandFailureError, never> => {
-        // Detects when a variable is not set
-        if (
-          e.cause instanceof $.ShellError &&
-          e.cause.exitCode === 1 &&
-          e.cause.stdout.toString() === "" &&
-          e.cause.stderr.toString() === ""
-        ) {
-          return Effect.fail(new UndefinedVariableError({ variable: variable }));
-        }
-        return Effect.fail(e);
-      })
-    );
-
-    // If the variable is stored in a file (e.g. with docker secrets) reads the file
-    if (result && file) {
-      result = yield* getShellOutput(`docker exec ${containerId} cat ${result}`);
-    }
-
-    return yield* Effect.succeed(result);
   });
 
 /**
@@ -173,3 +138,31 @@ export const formatHumanDate = (date: Date) => {
 
   return `${fullDateStr} at ${timeStr}`;
 };
+
+export const ensureWritePermission = (
+  p: string
+): Effect.Effect<void, FileSystemPermissionError | ShellCommandFailureError, never> =>
+  Effect.promise(async () => {
+    const dir = dirname(p);
+    let exitCode: number = -1;
+
+    try {
+      const result = await $`test -w ${dir}`.quiet();
+      exitCode = result.exitCode;
+    } catch (error) {
+      if (error instanceof $.ShellError) {
+        exitCode = error.exitCode;
+      } else {
+        return Effect.fail(
+          new ShellCommandFailureError({
+            cause: error,
+            message: `Failed to test write permission for path ${p}`,
+          })
+        );
+      }
+    }
+
+    if (exitCode !== 0) return Effect.fail(new FileSystemPermissionError({ path: p }));
+
+    return Effect.void;
+  });

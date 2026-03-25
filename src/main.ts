@@ -3,8 +3,9 @@ import { Command } from "commander";
 
 import { BackupCommand } from "./commands/backup.cmd";
 import { ConfigCommand } from "./commands/config/index.cmd";
-import { restoreCommand } from "./commands/config/restore.cmd";
 import { ResticCommand } from "./commands/restic.cmd";
+import { RestoreCommand } from "./commands/restore.cmd";
+import { ServiceIndexCommand } from "./commands/service/index.cmd";
 import { DOCKUP_ASCII } from "./lib/help-art";
 
 const program = new Command()
@@ -15,7 +16,8 @@ const program = new Command()
   .addCommand(ResticCommand)
   .addCommand(BackupCommand)
   .addCommand(ConfigCommand)
-  .addCommand(restoreCommand)
+  .addCommand(RestoreCommand)
+  .addCommand(ServiceIndexCommand)
   .addHelpText("beforeAll", DOCKUP_ASCII)
   .addHelpText("afterAll", " ");
 

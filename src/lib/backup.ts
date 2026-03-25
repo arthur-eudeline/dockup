@@ -1,16 +1,22 @@
 import { $ } from "bun";
 import chalk from "chalk";
 import { Effect } from "effect";
-import { z } from "zod";
 
+import {
+  formatResticConfigToEnvArgs,
+  formatVolumeToArgs,
+  getContainerEnvVariables,
+  getContainerVolumes,
+  getContainerEnvVariable,
+} from "./docker";
 import type { ContainerBackupConfig } from "./docker";
 import { ConfigTag } from "./effect";
 import type { ParsingError } from "./errors";
 import { ShellCommandFailureError, UndefinedVariableError } from "./errors";
 import { configToResticEnv, parseResticBackupOutput } from "./restic";
-import type { ResticSuccessfulBackupStructuredOutput, ResticSuccessfulVolumeBackupStructuredOutput } from "./restic";
+import type { ResticSuccessfulBackupStructuredOutput } from "./restic";
 import type { TaskLog } from "./types";
-import { getContainerEnvVariable, streamShellOutput } from "./utils";
+import { streamShellOutput } from "./utils";
 
 /**
  * Gets the required mariadb required env variables
@@ -19,23 +25,27 @@ import { getContainerEnvVariable, streamShellOutput } from "./utils";
  */
 const getMariadbEnvVariables = (containerId: string) =>
   Effect.gen(function* _getMariadbEnvVariables() {
-    const user = yield* getContainerEnvVariable(containerId, "MARIADB_USER").pipe(
-      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => getContainerEnvVariable(containerId, "MYSQL_USER"))
+    const vars = yield* getContainerEnvVariables(containerId);
+
+    const user = yield* getContainerEnvVariable(containerId, vars, "MARIADB_USER").pipe(
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => getContainerEnvVariable(containerId, vars, "MYSQL_USER"))
     );
 
-    const database = yield* getContainerEnvVariable(containerId, "MARIADB_DATABASE").pipe(
-      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => getContainerEnvVariable(containerId, "MYSQL_DATABASE"))
+    const database = yield* getContainerEnvVariable(containerId, vars, "MARIADB_DATABASE").pipe(
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => getContainerEnvVariable(containerId, vars, "MYSQL_DATABASE"))
     );
 
-    const passwordFile = yield* getContainerEnvVariable(containerId, "MARIADB_PASSWORD_FILE", true).pipe(
+    const passwordFile = yield* getContainerEnvVariable(containerId, vars, "MARIADB_PASSWORD_FILE", true).pipe(
       Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () =>
-        getContainerEnvVariable(containerId, "MYSQL_PASSWORD_FILE", true)
+        getContainerEnvVariable(containerId, vars, "MYSQL_PASSWORD_FILE", true)
       ),
       Effect.catchAll(() => Effect.succeed(null))
     );
 
-    const password = yield* getContainerEnvVariable(containerId, "MARIADB_PASSWORD", true).pipe(
-      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => getContainerEnvVariable(containerId, "MYSQL_PASSWORD", true)),
+    const password = yield* getContainerEnvVariable(containerId, vars, "MARIADB_PASSWORD", true).pipe(
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () =>
+        getContainerEnvVariable(containerId, vars, "MYSQL_PASSWORD", true)
+      ),
       Effect.catchAll(() => Effect.succeed(null))
     );
 
@@ -91,7 +101,7 @@ export const restoreMariaDB = (
   container: ContainerBackupConfig,
   snapshotId: string,
   logger: TaskLog
-): Effect.Effect<void, ShellCommandFailureError | UndefinedVariableError, ConfigTag> =>
+): Effect.Effect<void, ShellCommandFailureError | UndefinedVariableError | ParsingError, ConfigTag> =>
   Effect.gen(function* _restoreMariaDB() {
     const mdb = yield* getMariadbEnvVariables(container.id);
     const config = yield* ConfigTag;
@@ -111,12 +121,14 @@ export const restoreMariaDB = (
  */
 const getPostgresEnvVariables = (containerId: string) =>
   Effect.gen(function* _getPostgresEnvVariables() {
-    const user = yield* getContainerEnvVariable(containerId, "POSTGRES_USER");
-    const database = yield* getContainerEnvVariable(containerId, "POSTGRES_DB");
-    const passwordFile = yield* getContainerEnvVariable(containerId, "POSTGRES_PASSWORD_FILE", true).pipe(
+    const vars = yield* getContainerEnvVariables(containerId);
+
+    const user = yield* getContainerEnvVariable(containerId, vars, "POSTGRES_USER");
+    const database = yield* getContainerEnvVariable(containerId, vars, "POSTGRES_DB");
+    const passwordFile = yield* getContainerEnvVariable(containerId, vars, "POSTGRES_PASSWORD_FILE", true).pipe(
       Effect.catchAll(() => Effect.succeed(null))
     );
-    const password = yield* getContainerEnvVariable(containerId, "POSTGRES_PASSWORD").pipe(
+    const password = yield* getContainerEnvVariable(containerId, vars, "POSTGRES_PASSWORD").pipe(
       Effect.catchAll(() => Effect.succeed(null))
     );
 
@@ -170,7 +182,7 @@ export const restorePostgres = (
   container: ContainerBackupConfig,
   snapshotId: string,
   logger: TaskLog
-): Effect.Effect<void, ShellCommandFailureError | UndefinedVariableError, ConfigTag> =>
+): Effect.Effect<void, ShellCommandFailureError | UndefinedVariableError | ParsingError, ConfigTag> =>
   Effect.gen(function* _restorePostgres() {
     const pg = yield* getPostgresEnvVariables(container.id);
     const config = yield* ConfigTag;
@@ -183,11 +195,6 @@ export const restorePostgres = (
     });
   });
 
-const VOLUME_SCHEMA = z.object({
-  Source: z.string(),
-  Destination: z.string(),
-});
-
 /**
  * Backup volumes of a container
  * @param container the container infos
@@ -197,36 +204,31 @@ export const backupVolumes = (
   container: ContainerBackupConfig,
   logger: TaskLog
 ): Effect.Effect<
-  ResticSuccessfulVolumeBackupStructuredOutput[],
+  // ResticSuccessfulVolumeBackupStructuredOutput[],
+  ResticSuccessfulBackupStructuredOutput,
   ShellCommandFailureError | UndefinedVariableError | ParsingError,
   ConfigTag
 > =>
   Effect.gen(function* _backupVolumes() {
-    const raw = yield* Effect.promise(() => $`docker inspect --format='{{json .Mounts}}' ${container.id}`.text());
-    const json = JSON.parse(raw);
-    const volumes = z.array(VOLUME_SCHEMA).parse(json);
-
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 
-    return yield* Effect.all(
-      volumes.map((v) =>
-        Effect.gen(function* _b() {
-          const output = yield* streamShellOutput({
-            cmd: `restic backup ${v.Source} --tag ${container.backupName} --json --host ${container.backupName}`,
-            env,
-            logger,
-          });
+    const volumes = yield* getContainerVolumes(container.id);
+    const volumeArgs = yield* formatVolumeToArgs(volumes);
+    const volumeDests = volumes.map((v) => v.Destination).join(" ");
+    const envArgs = yield* formatResticConfigToEnvArgs(env);
 
-          const parsed = yield* parseResticBackupOutput(container.backupName, output);
+    const output = yield* streamShellOutput({
+      logger,
+      cmd: `docker run --rm \
+  --name dockup-restic-backup \
+  --network host \
+  ${volumeArgs} \
+  ${envArgs} \
+  restic/restic:latest backup ${volumeDests} --tag ${container.backupName} --json --host ${container.backupName}`,
+    });
 
-          return yield* Effect.succeed({
-            ...parsed,
-            volumeName: v.Destination,
-          });
-        })
-      )
-    );
+    return yield* parseResticBackupOutput(container.backupName, output);
   });
 
 /**
@@ -239,12 +241,8 @@ export const restoreVolumes = (
   container: ContainerBackupConfig,
   snapshotId: string,
   logger: TaskLog
-): Effect.Effect<void, UndefinedVariableError | ShellCommandFailureError, ConfigTag> =>
+): Effect.Effect<void, UndefinedVariableError | ShellCommandFailureError | ParsingError, ConfigTag> =>
   Effect.gen(function* _backupVolumes() {
-    const raw = yield* Effect.promise(() => $`docker inspect --format='{{json .Mounts}}' ${container.id}`.text());
-    const json = JSON.parse(raw);
-    const volumes = z.array(VOLUME_SCHEMA).parse(json);
-
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 
@@ -256,21 +254,19 @@ export const restoreVolumes = (
       onSuccess: () => stoppingLogger.success(chalk.green(`Container ${chalk.yellow(container.id)} stopped.`)),
     });
 
-    yield* Effect.all(
-      volumes.map((v) =>
-        Effect.gen(function* _restoreVolumes() {
-          const restoreLogger = logger.group(`Restoring snapshot ${snapshotId} for volume ${v.Destination}...`);
-          yield* streamShellOutput({
-            cmd: `restic restore ${snapshotId} --target / --include ${v.Source}`,
-            env,
-            logger: restoreLogger,
-            onError: () => restoreLogger.error(`Failed to restore snapshot ${chalk.yellow(snapshotId)}`),
-            onSuccess: () =>
-              restoreLogger.success(chalk.green(`Snapshot ${chalk.yellow(snapshotId)} restored successfully.`)),
-          });
-        })
-      )
-    );
+    const volumes = yield* getContainerVolumes(container.id);
+    const volumeArgs = yield* formatVolumeToArgs(volumes);
+    const envArgs = yield* formatResticConfigToEnvArgs(env);
+
+    yield* streamShellOutput({
+      logger,
+      cmd: `docker run --rm \
+  --name dockup-restic-backup \
+  --network host \
+  ${volumeArgs} \
+  ${envArgs} \
+  restic/restic:latest restore ${snapshotId} --target / ${volumes.map((_v) => `--include ${_v.Destination}`).join(" ")} --json`,
+    });
 
     const startLogger = logger.group(`Restarting container ${chalk.yellow(container.id)}`);
     yield* streamShellOutput({

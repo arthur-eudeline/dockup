@@ -66,6 +66,7 @@ services:
       - DB_PASSWORD
     volumes:
       - ./wordpress:/var/www/html
+      - ./.htaccess:/var/www/html/.htaccess:ro
       - ./logs:/var/log/apache2/
 
   mariadb:

@@ -110,12 +110,12 @@ export const BackupCommand = new Command()
 
       // Notify
       const messages = yield* formatDiscordReport(reportLines);
-      // yield* Effect.all(messages.map(notifyDiscord));
+      yield* Effect.all(messages.map(notifyDiscord));
     }).pipe(
-      Effect.catchAll((e) => {
-        console.error(e);
-        return Effect.void;
-      }),
+      // Effect.catchAll((e) => {
+      //   console.error(e);
+      //   return Effect.void;
+      // }),
       Effect.ensureErrorType<never>()
     );
 

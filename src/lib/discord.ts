@@ -12,9 +12,14 @@ export const formatDiscordReport = (reportLines: ResticStructuredOutput[]): Effe
     let formatted = "";
 
     if (l.type === "backup") {
-      formatted = l.success
-        ? `🟢 backuped \`${l.backupName}\` : ${l.dataAdded} in ${l.totalDuration}`
-        : `🔴 failed to backup \`${l.backupName}\` : (\`${l.code}\`) ${l.message} (@everyone)`;
+      if (l.success) {
+        const parts = [`🟢 backuped \`${l.backupName}\``];
+        if ("volumeName" in l) parts.push(l.volumeName);
+        parts.push(`: ${l.dataAdded} in ${l.totalDuration}`);
+        formatted = parts.join(" ");
+      } else {
+        formatted = `🔴 failed to backup \`${l.backupName}\` : (\`${l.code}\`) ${l.message} (@everyone)`;
+      }
     } else if (l.type === "clean-up") {
       formatted = `🟢 cleaned up ${l.snapshotsRemoved} snapshots. ${l.formattedFreed} space saved`;
     }

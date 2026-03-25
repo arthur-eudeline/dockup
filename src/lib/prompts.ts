@@ -1,10 +1,11 @@
 // oxlint-disable promise/prefer-await-to-then
-import { isCancel, select } from "@clack/prompts";
+import { isCancel, select, spinner } from "@clack/prompts";
 import type { SelectOptions } from "@clack/prompts";
 import chalk from "chalk";
 import { Effect } from "effect";
 
 import type { ContainerBackupConfig } from "./docker";
+import type { AnyTaggedError } from "./effect";
 import type { ResticSnapshotItemStructredOutput } from "./restic";
 
 export const promptSelect = <T>(args: SelectOptions<T>) =>
@@ -36,4 +37,27 @@ export const promptSelectSnapshot = (snapshots: ResticSnapshotItemStructredOutpu
       label: `${chalk.yellow(snapshot.id)} - ${snapshot.size}\t ${snapshot.relativeDate}`,
       value: snapshot,
     })),
+  });
+
+export const safeSpinner = <A, E extends AnyTaggedError, R>(
+  effect: Effect.Effect<A, E, R>,
+  args: {
+    title: string;
+    onSuccess: (result: A) => string;
+    onError: (msg: E) => string;
+  }
+): Effect.Effect<void, never, R> =>
+  Effect.gen(function* _safeSpinner() {
+    const s = spinner();
+    s.start(args.title);
+    yield* effect.pipe(
+      Effect.map((result) => {
+        s.stop(args.onSuccess(result));
+        return Effect.void;
+      }),
+      Effect.catchAll((error) => {
+        s.error(args.onError(error));
+        return Effect.void;
+      })
+    );
   });

@@ -6,7 +6,8 @@
   },
   "scripts": {
     "check": "ultracite check",
-    "fix": "ultracite fix"
+    "fix": "ultracite fix",
+    "build": "bun build ./src/main.ts --compile --target=bun-linux-x64 --outfile dockup"
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0",

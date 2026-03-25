@@ -1,18 +1,18 @@
-import { intro, outro, taskLog } from "@clack/prompts";
+import { intro, log, outro, taskLog } from "@clack/prompts";
 import chalk from "chalk";
 import { Command } from "commander";
 import { Effect } from "effect";
 
-import { restoreMariaDB, restorePostgres, restoreVolumes } from "../../lib/backup";
-import { listBackupEnabledContainers } from "../../lib/docker";
-import { effectRuntime } from "../../lib/effect";
-import { promptSelectContainer, promptSelectSnapshot } from "../../lib/prompts";
-import { listSnapshots } from "../../lib/restic";
+import { restoreMariaDB, restorePostgres, restoreVolumes } from "../lib/backup";
+import { listBackupEnabledContainers } from "../lib/docker";
+import { effectRuntime } from "../lib/effect";
+import { promptSelectContainer, promptSelectSnapshot } from "../lib/prompts";
+import { listSnapshots } from "../lib/restic";
 
 /**
  * Restores a snapshot
  */
-export const restoreCommand = new Command()
+export const RestoreCommand = new Command()
   .name("restore")
   .description("Restores a restic snapshot")
   .action(async () => {
@@ -22,6 +22,14 @@ export const restoreCommand = new Command()
 
       const container = yield* promptSelectContainer(containers);
       const snapshots = yield* listSnapshots(container.backupName);
+      if (snapshots.length === 0) {
+        log.warn(
+          `There is no snapshots available to restaure.\nTry creating one by running ${chalk.yellow("dockup backup")} command.`
+        );
+        outro("Done.");
+        process.exit(1);
+      }
+
       const snapshot = yield* promptSelectSnapshot(snapshots);
 
       const logger = taskLog({
