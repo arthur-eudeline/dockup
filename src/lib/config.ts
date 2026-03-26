@@ -1,3 +1,4 @@
+// oxlint-disable promise/prefer-await-to-then
 // oxlint-disable prefer-destructuring
 import { exists } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -7,13 +8,16 @@ import { Effect } from "effect";
 import { z } from "zod";
 
 import { decryptFile, encryptFile } from "./crypto";
-import { ConfigurationRetrievalError, InvalidConfigurationError } from "./errors";
+import { ConfigurationRetrievalError, InvalidConfigurationError, ShellCommandFailureError } from "./errors";
+import { getShellOutput } from "./utils";
 
 /**
  * The dockup configuration path
  */
 export const configPath = join("/etc/dockup.conf");
 const configFile = Bun.file(configPath);
+
+export const DOCKUP_SHELL_USER = "dockup";
 
 /**
  * The dockup configuration object validation schema
@@ -74,4 +78,46 @@ export const writeConfig = (config: Config): Effect.Effect<void, never, never> =
     const dir = dirname(configPath);
     if (!(await exists(dir))) await $`mkdir -p ${dir}`;
     await encryptFile(configPath, JSON.stringify(config));
+
+    await $`sudo chown $USER:$USER ${configPath}`;
+
+    /**
+     * Permissions :
+     * Current user : read write 6
+     * dockup (group) : read only 4
+     * others : no access 0
+     */
+    await $`sudo chmod 640 ${configPath}`;
+  });
+
+export const addConfigPermission = (): Effect.Effect<void, ShellCommandFailureError> =>
+  getShellOutput(`sudo chown $USER:${DOCKUP_SHELL_USER} ${configPath}`);
+
+export const removeConfigPermission = (): Effect.Effect<void, ShellCommandFailureError> =>
+  getShellOutput(`sudo chown $USER:$USER ${configPath}`);
+
+export const checkIfUserExists = (): Effect.Effect<boolean, never> =>
+  Effect.tryPromise(() => $`getent passwd ${DOCKUP_SHELL_USER}`.quiet().then(() => true)).pipe(
+    Effect.catchAll(() => Effect.succeed(false))
+  );
+
+export const createUser = (): Effect.Effect<void, ShellCommandFailureError> =>
+  getShellOutput(`sudo adduser --system --group --no-create-home --shell /bin/false ${DOCKUP_SHELL_USER}`);
+
+export const deleteUser = (): Effect.Effect<void, ShellCommandFailureError> =>
+  getShellOutput(`sudo deluser ${DOCKUP_SHELL_USER}`);
+
+export const checkIfUserIsInDockerGroup = (): Effect.Effect<boolean, never> =>
+  Effect.tryPromise(() => $`groups ${DOCKUP_SHELL_USER}`.text().then((r) => r.includes("docker"))).pipe(
+    Effect.catchAll(() => Effect.succeed(false))
+  );
+
+export const addUserToDockerGroup = (): Effect.Effect<void, ShellCommandFailureError> =>
+  Effect.tryPromise({
+    try: () => $`sudo usermod -aG docker ${DOCKUP_SHELL_USER}`,
+    catch: (e) =>
+      new ShellCommandFailureError({
+        cause: e,
+        message: `Failed to add ${DOCKUP_SHELL_USER} user to docker group`,
+      }),
   });

@@ -1,5 +1,5 @@
 // oxlint-disable promise/prefer-await-to-then
-import { isCancel, select, spinner } from "@clack/prompts";
+import { isCancel, log, S_SUCCESS, select, spinner } from "@clack/prompts";
 import type { SelectOptions } from "@clack/prompts";
 import chalk from "chalk";
 import { Effect } from "effect";
@@ -60,4 +60,53 @@ export const safeSpinner = <A, E extends AnyTaggedError, R>(
         return Effect.void;
       })
     );
+  });
+
+export const taskSpinner = <A, E extends AnyTaggedError, R>(
+  effect: Effect.Effect<A, E, R>,
+  args: {
+    title: string;
+    onSuccess: (result: A) => string;
+    onError: (msg: E) => string;
+    skip?: {
+      onSkip: () => string;
+      condition: Effect.Effect<boolean>;
+    };
+  }
+): Effect.Effect<A | null, E, R> =>
+  Effect.gen(function* _taskSpinner() {
+    const s = spinner();
+    s.start(args.title);
+
+    if (args.skip) {
+      const skip = yield* args.skip.condition;
+      if (skip) {
+        s.clear();
+        log.message(args.skip.onSkip(), {
+          symbol: chalk.yellow(S_SUCCESS),
+          spacing: 0,
+        });
+        return null;
+      }
+    }
+
+    const result = yield* effect.pipe(
+      // On Error
+      Effect.catchAll((e) => {
+        s.clear();
+        log.message(args.onError(e), {
+          symbol: chalk.red(S_SUCCESS),
+          spacing: 0,
+        });
+        return Effect.fail(e);
+      })
+    );
+
+    s.clear();
+    log.message(args.onSuccess(result), {
+      symbol: chalk.green(S_SUCCESS),
+      spacing: 0,
+    });
+
+    return result;
   });

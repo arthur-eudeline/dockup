@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { $ } from "bun";
 import { Effect } from "effect";
 
-import { UndefinedVariableError, ShellCommandFailureError, FileSystemPermissionError } from "./errors";
+import { ShellCommandFailureError, FileSystemPermissionError } from "./errors";
 
 /**
  * Executes a shell command and returns its output trimed

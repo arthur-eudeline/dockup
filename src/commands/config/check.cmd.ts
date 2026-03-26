@@ -1,11 +1,17 @@
 import { dirname } from "node:path";
 
-import { intro, outro } from "@clack/prompts";
+import { intro, log, outro } from "@clack/prompts";
 import chalk from "chalk";
 import { Command } from "commander";
 import { Effect } from "effect";
 
-import { configPath, readConfig } from "../../lib/config";
+import {
+  checkIfUserExists,
+  checkIfUserIsInDockerGroup,
+  configPath,
+  DOCKUP_SHELL_USER,
+  readConfig,
+} from "../../lib/config";
 import type { Config } from "../../lib/config";
 import { ensureDockerPermissions } from "../../lib/docker";
 import { ConfigTag } from "../../lib/effect";
@@ -53,6 +59,13 @@ export const ConfigCheckCommand = new Command()
           onSuccess: () => chalk.green("restic repo : configured at ") + chalk.yellow(config?.RESTIC_REPOSITORY),
           onError: (e) => chalk.red(`restic repo : error\n${e.message}`),
         });
+      }
+
+      const userExists = yield* checkIfUserExists();
+      if (!userExists) {
+        log.warn(`${chalk.yellow(DOCKUP_SHELL_USER)} user does not exists`);
+      } else {
+        log.info(`User in docker group : ${yield* checkIfUserIsInDockerGroup()}`);
       }
 
       outro("Done");

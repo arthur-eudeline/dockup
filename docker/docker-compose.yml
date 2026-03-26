@@ -62,10 +62,11 @@ services:
       WORDPRESS_DB_USER: ${DB_USER?:error}
       WORDPRESS_DB_PASSWORD_FILE: /run/secrets/DB_PASSWORD
       WORDPRESS_DB_NAME: ${DB_NAME?:error}
+      TEST_CHELOU: "OUI=NON"
     secrets:
       - DB_PASSWORD
     volumes:
-      - ./wordpress:/var/www/html
+      - wordpress:/var/www/html
       - ./.htaccess:/var/www/html/.htaccess:ro
       - ./logs:/var/log/apache2/
 
@@ -90,3 +91,6 @@ services:
 secrets:
   DB_PASSWORD:
     environment: DB_PASSWORD
+
+volumes:
+  wordpress:

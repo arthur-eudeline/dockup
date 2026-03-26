@@ -6,8 +6,9 @@ import { Command } from "commander";
 import { Effect } from "effect";
 import { z } from "zod";
 
-import { CONFIG_SCHEMA, configPath, validateConfig, writeConfig } from "../../lib/config";
-import { ensureWritePermission } from "../../lib/utils";
+import { CONFIG_SCHEMA, configPath, DOCKUP_SHELL_USER, validateConfig, writeConfig } from "../../lib/config";
+import { safeSpinner } from "../../lib/prompts";
+import { ensureWritePermission, getShellOutput } from "../../lib/utils";
 
 export const ConfigInitCommand = new Command()
   .name("init")
@@ -16,8 +17,10 @@ export const ConfigInitCommand = new Command()
     intro("Dockup configuration setup :");
 
     const program = Effect.gen(function* program() {
+      // Test write permission on config dir
       yield* ensureWritePermission(dirname(configPath));
 
+      // Config
       const AWS_ACCESS_KEY_ID = yield* Effect.promise(() =>
         text({
           message: "S3 Access key ID",
@@ -95,6 +98,7 @@ export const ConfigInitCommand = new Command()
       yield* writeConfig(config);
 
       log.success(`File saved at ${configPath}`);
+
       outro("Done");
     }).pipe(
       Effect.catchAll((e) => {
