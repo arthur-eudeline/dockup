@@ -112,6 +112,11 @@ export const checkIfUserIsInDockerGroup = (): Effect.Effect<boolean, never> =>
     Effect.catchAll(() => Effect.succeed(false))
   );
 
+export const checkIfCurrentUserIsInDockupGroup = (): Effect.Effect<boolean, never> =>
+  Effect.tryPromise(() => $`groups $USER`.text().then((r) => r.includes(DOCKUP_SHELL_USER))).pipe(
+    Effect.catchAll(() => Effect.succeed(false))
+  );
+
 export const addUserToDockerGroup = (): Effect.Effect<void, ShellCommandFailureError> =>
   Effect.tryPromise({
     try: () => $`sudo usermod -aG docker ${DOCKUP_SHELL_USER}`,
@@ -119,5 +124,21 @@ export const addUserToDockerGroup = (): Effect.Effect<void, ShellCommandFailureE
       new ShellCommandFailureError({
         cause: e,
         message: `Failed to add ${DOCKUP_SHELL_USER} user to docker group`,
+      }),
+  });
+
+export const addCurrentUserToDockupGroup = (): Effect.Effect<string, ShellCommandFailureError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const currentUser = await $`whoami`.text();
+
+      await $`sudo usermod -aG $USER ${DOCKUP_SHELL_USER}`;
+
+      return currentUser;
+    },
+    catch: (e) =>
+      new ShellCommandFailureError({
+        message: `Failed to add current user to ${DOCKUP_SHELL_USER} group`,
+        cause: e,
       }),
   });

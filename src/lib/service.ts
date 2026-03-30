@@ -19,8 +19,7 @@ After=network.target docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/opt/dockup/dockup backup
-WorkingDirectory=/opt/dockup
+ExecStart=dockup backup
 User=${DOCKUP_SHELL_USER}
 Group=${DOCKUP_SHELL_USER}
 `);
@@ -61,6 +60,7 @@ export const registerService = () =>
     try: async () => {
       await $`systemctl daemon-reload`.quiet();
       await $`systemctl enable ${SERVICE_NAME}.timer`.quiet();
+      await $`systemctl start ${SERVICE_NAME}.timer`.quiet();
     },
     catch: (e) =>
       new ShellCommandFailureError({

@@ -1,11 +1,13 @@
-import { intro, outro } from "@clack/prompts";
+import { intro, log, outro, S_SUCCESS } from "@clack/prompts";
 import chalk from "chalk";
 import { Command } from "commander";
 import { Effect } from "effect";
 
 import {
   addConfigPermission,
+  addCurrentUserToDockupGroup,
   addUserToDockerGroup,
+  checkIfCurrentUserIsInDockupGroup,
   checkIfUserExists,
   checkIfUserIsInDockerGroup,
   configPath,
@@ -54,6 +56,22 @@ export const ServiceInitCommand = new Command()
         },
       });
 
+      // Adding current user to dockup group
+      let needRelog = true;
+      yield* taskSpinner(addCurrentUserToDockupGroup(), {
+        title: `adding current user to ${chalk.yellow(DOCKUP_SHELL_USER)} group`,
+        onSuccess: (currentUser) =>
+          chalk.green(`${chalk.yellow(currentUser)} added to the ${chalk.yellow(DOCKUP_SHELL_USER)} group`),
+        onError: () => chalk.red(`failed to add current user to ${chalk.yellow(DOCKUP_SHELL_USER)} group`),
+        skip: {
+          condition: checkIfCurrentUserIsInDockupGroup(),
+          onSkip: () => {
+            needRelog = false;
+            return chalk.yellow(`current user already in ${chalk.yellow(DOCKUP_SHELL_USER)} group`);
+          },
+        },
+      });
+
       // Updating the dockup config permissions
       yield* taskSpinner(addConfigPermission(), {
         title: `granting read permission to ${chalk.yellow(DOCKUP_SHELL_USER)} user on config file at ${chalk.yellow(configPath)}`,
@@ -88,7 +106,13 @@ export const ServiceInitCommand = new Command()
         onError: () => chalk.red(`failed enable service ${chalk.yellow(SERVICE_NAME)}`),
       });
 
-      outro(chalk.green("Service registered.\nBackups will be trigered at 02:00 AM every day from now on"));
+      if (needRelog) {
+        log.message(chalk.yellow("WARNING : some changes requires you to re-log to take effect."), {
+          symbol: chalk.yellow(S_SUCCESS),
+        });
+      }
+
+      outro(chalk.green("Service registered.\nBackups will be trigered at 02:00 AM every day from now on."));
     }).pipe(
       Effect.catchTags({
         SHELL_COMMAND_FAILURE_ERROR: (e) => {

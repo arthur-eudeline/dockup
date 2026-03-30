@@ -1,0 +1,26 @@
+- [x] Webhook discord
+- [ ] Backup
+  - [x] MariaDB
+  - [x] Postgres
+  - [x] Folder
+  - [ ] Improve backup logs
+  - [ ] Log
+- [x] Restore
+  - [x] Restaure Postgres
+  - [x] Restaure MariaDB
+  - [x] Restaure folder
+- [x] Command
+- [x] Setup
+- [ ] CRON
+  - [x] Install
+    - [x] Créer l’utilisateur dockup avec le group
+    - [x] Modifier les permissions du fichier config
+    - [x] Créer le service
+  - [x] Uninstall
+  - [x] Test sudo systemctl start dockup.service
+  - [ ] Log sudo journalctl -u dockup-auto-backup -f
+  - [ ] Doctor systemctl list-unit-files | grep dockup
+- [ ] Doctor
+- [x] Secrets
+- [x] améliorer env
+- [x] mettre le script dans le dossier /usr/local/bin
