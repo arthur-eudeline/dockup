@@ -7,9 +7,9 @@ import { ConfigCommand } from "./commands/config/index.cmd";
 import { ResticCommand } from "./commands/restic.cmd";
 import { RestoreCommand } from "./commands/restore.cmd";
 import { ServiceIndexCommand } from "./commands/service/index.cmd";
+import { UpgradeCommand } from "./commands/upgrade.cmd";
 import { DOCKUP_ASCII } from "./lib/help-art";
-
-const VERSION = "0.0.1";
+import { VERSION } from "./lib/version";
 
 // Last-resort safety net: a command runner (src/lib/cli.ts) is expected to
 // handle its own errors, but nothing should ever crash with a raw stack trace.
@@ -20,7 +20,8 @@ process.on("unhandledRejection", (reason) => {
 
 const program = new Command()
   .name("dockup")
-  .version(VERSION)
+  // `-v` rather than commander's default `-V`, which nobody types.
+  .version(VERSION, "-v, --version", "output the dockup version")
   .description(
     `Docker container backup system using docker labels to configure backup strategy at container level (like traefik). Based on Restic.`
   )
@@ -29,6 +30,7 @@ const program = new Command()
   .addCommand(ConfigCommand)
   .addCommand(RestoreCommand)
   .addCommand(ServiceIndexCommand)
+  .addCommand(UpgradeCommand)
   .addHelpText("beforeAll", DOCKUP_ASCII)
   .addHelpText("before", `Version : ${chalk.yellow(VERSION)}\n`)
   .addHelpText("afterAll", " ");

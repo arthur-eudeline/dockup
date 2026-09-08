@@ -14,6 +14,7 @@ so there is no per-service config file. Runs on **Bun**, written in TypeScript.
 bun run check        # lint + format check (ultracite → oxlint + oxfmt)
 bun run fix          # autofix lint/format issues
 bun run build        # compile a standalone linux-x64 binary at ./dockup
+bun run release      # bump + changelog + release commit + tag (see Releases)
 bun src/main.ts ...   # run the CLI directly in dev (no build step needed)
 ```
 
@@ -22,6 +23,10 @@ test files exist). `bun run check` is the only gate.
 
 Deploy: `upload.sh` rsyncs the compiled `./dockup` binary to the server and moves it to
 `/usr/local/bin`. The binary must be rebuilt (`bun run build`) before uploading.
+
+CI (`.github/workflows/`): `ci.yml` runs `bun run check` + a linux-x64 compile on every push
+and PR; `release.yml` builds every target and publishes a GitHub release when a `v*` tag is
+pushed. Versions and `CHANGELOG.md` come from the conventional commits (see **Releases** below).
 
 ### CLI surface (see `src/main.ts`)
 
@@ -33,6 +38,9 @@ Deploy: `upload.sh` rsyncs the compiled `./dockup` binary to the server and move
 - `dockup config init` / `dockup config check` (alias `doctor`) — manage/validate the config file.
 - `dockup service init` (alias `setup`) / `test` / `remove` (alias `uninstall`); the `service`
   group is also aliased `cron`. Installs a systemd service + timer for a daily 02:00 backup.
+- `dockup upgrade` (alias `update`, flags `--check` / `--force`) — download the latest GitHub
+  release for this platform and replace the running binary.
+- `dockup -v` / `--version` — print the version (commander's default `-V` is overridden).
 
 ## Architecture
 
@@ -133,11 +141,24 @@ up, says so locally _and_ in the Discord report, and loses only the streak alert
 **systemd** (`src/lib/service.ts`). Writes unit + timer to `/etc/systemd/system/` through
 `sudo tee` (they are root-owned, and every other step of the flow already uses `sudo`), service
 name `dockup-auto-backup`, runs `dockup backup` as user/group `dockup`. `ExecStart` must be an
-absolute path — systemd rejects the unit otherwise — so `resolveExecStart()` uses
-`process.execPath` for the compiled binary and falls back to `/usr/local/bin/dockup`.
-`service init` also creates the `dockup` system user, adds it to the `docker` group, adjusts
-config-file ownership, and creates `/var/lib/dockup` (`770 dockup:dockup`); `service remove`
-deletes that directory.
+absolute path — systemd rejects the unit otherwise — so `resolveBinaryPath()` (`utils.ts`, shared
+with `upgrade`) uses `process.execPath` for the compiled binary and falls back to
+`/usr/local/bin/dockup`. `service init` also creates the `dockup` system user, adds it to the
+`docker` group, adjusts config-file ownership, and creates `/var/lib/dockup` (`770 dockup:dockup`);
+`service remove` deletes that directory.
+
+**Version and self-update** (`src/lib/version.ts` + `src/lib/upgrade.ts`). `VERSION` is read from
+`package.json` and inlined by the bundler, so the manifest is the single source of truth and the
+release workflow only has to check that the tag agrees with it. `upgrade` reads
+`/releases/latest` off the GitHub API, picks the asset named
+`dockup-${process.platform}-${process.arch}` — that name is a contract with `release.yml` — and
+**refuses to install anything the release's `SHA256SUMS.txt` does not vouch for**: it overwrites a
+binary that runs nightly as a privileged user. The new binary is staged inside the install
+directory and `mv`-ed into place, because a same-directory rename is atomic and legal while the
+file it replaces is the executable currently running (writing to it directly is `ETXTBSY`).
+When the install directory is not writable the command primes `sudo -v` _before_ starting the
+spinner: `getShellOutput` captures stderr, so a password prompt raised mid-install would be
+invisible.
 
 ## Runtime requirements
 
@@ -147,6 +168,40 @@ Backup/restore and `service` commands assume a Linux host with systemd and `sudo
 a local compose stack (RustFS as S3, plus labeled postgres/mariadb/wordpress) for exercising the
 tool. Note the
 `volumes` path uses `docker run --network host`, which does not work under Docker Desktop.
+
+## Releases
+
+**Commit messages decide the version**, so write them as conventional commits. Only four types
+release anything — `feat` → minor, `fix` / `perf` / `revert` → patch — and a `!` after the type or
+a `BREAKING CHANGE:` footer in the body makes it major. Everything else (`chore`, `docs`,
+`refactor`, `test`, `ci`, `build`, `style`, or a message that is not conventional at all) is
+deliberately invisible to the release: it lands in git history and nowhere else. The scope is free
+— use module names (`fix(restic,report): …`); they are rendered in the changelog, not resolved as
+package names.
+
+`bun run release` (`scripts/tegami.mts`, built on [tegami](https://tegami.fuma-nama.dev/)) does the
+rest: read the conventional commits since the latest tag, bump `package.json`, prepend the section
+to `CHANGELOG.md`, commit `chore(release): v<version>` and tag `v<version>`. `--dry-run` prints the
+plan and writes nothing; `--yes` skips the confirmation. It refuses to run on a dirty tree, and
+says so when no commit since the last tag was releasable. Nothing is pushed: **`git push
+--follow-tags` is what starts the release**, and pushing the tag is the only thing that does.
+
+Then `release.yml` takes over: it refuses a tag that disagrees with the manifest — a binary
+reporting a version it was not built as would make `dockup upgrade` loop forever — cross-compiles
+every target from a single ubuntu runner, uploads them next to a `sha256sum` file, and publishes
+the release with this version's `CHANGELOG.md` section as its notes (falling back to GitHub's
+generated ones if that section cannot be found). Assets: `dockup-linux-x64`, `dockup-linux-arm64`,
+`dockup-darwin-x64`, `dockup-darwin-arm64`, `dockup-linux-x64-baseline` (same linux-x64 build for
+CPUs without AVX2, never picked automatically) and `SHA256SUMS.txt`. Renaming an asset breaks
+`dockup upgrade`.
+
+Two details of the tegami setup are load-bearing. `package.json` is `private: true` — dockup ships
+as a release binary, never to npm — which is also what keeps tegami's publishing phase from trying
+to `npm publish` it; the script therefore drives versioning through the programmatic API and does
+the tag itself. And tegami reads a commit's scope as the name of the package it touches (a monorepo
+assumption), so the script rewrites the generated entries onto the single `dockup` package before
+drafting — without that, every module-scoped commit would resolve to a package that does not exist
+and bump nothing.
 
 ## Conventions
 
@@ -159,4 +214,5 @@ tool. Note the
 - Anything that leaves a resource in a bad state on failure (a stopped container, a half-written
   file) must restore it with `Effect.ensuring` / `Effect.acquireRelease`, not a trailing step.
 - Generator effects are named (`Effect.gen(function* _doThing() {...})`) — match that style.
+- Commit messages are conventional commits: they are what bumps the version (see **Releases**).
 - Some code comments and user-facing strings are in French; the mix is pre-existing.

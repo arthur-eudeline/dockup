@@ -97,6 +97,38 @@ export class EmptyBackupError extends Data.TaggedError("EMPTY_BACKUP_ERROR")<{
   }
 }
 
+/**
+ * Raised when the GitHub release API (or a release asset) cannot be reached, or
+ * answers with something other than a 2xx.
+ */
+export class ReleaseFetchError extends Data.TaggedError("RELEASE_FETCH_ERROR")<{
+  cause: unknown;
+  message: string;
+}> {}
+
+/**
+ * Raised when no release asset is published for the running platform.
+ * `upgrade` refuses to guess rather than install a binary for another target.
+ */
+export class UnsupportedPlatformError extends Data.TaggedError("UNSUPPORTED_PLATFORM_ERROR")<{
+  target: string;
+}> {
+  override get message() {
+    return `No dockup release is published for ${this.target}. Build one from source with "bun run build".`;
+  }
+}
+
+/**
+ * Raised when the downloaded release cannot be trusted or installed: a missing
+ * asset, a checksum that does not match, a binary that could not be moved into
+ * place. Upgrade overwrites a binary that usually runs as root, so every one of
+ * those aborts the install instead of degrading it.
+ */
+export class UpgradeError extends Data.TaggedError("UPGRADE_ERROR")<{
+  cause?: unknown;
+  message: string;
+}> {}
+
 export class PermissionError extends Data.TaggedError("PERMISSION_ERROR")<{
   cause: unknown;
   message: string;

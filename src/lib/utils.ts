@@ -1,4 +1,4 @@
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 
 // oxlint-disable prefer-destructuring
 import { $ } from "bun";
@@ -113,6 +113,20 @@ export const streamShellOutput = (args: StreamShellOutputArgs): Effect.Effect<st
     args.onSuccess?.();
     return yield* Effect.succeed(output.join("\n"));
   });
+
+/** Where `upload.sh` and `dockup upgrade` install the compiled binary. */
+export const DEFAULT_INSTALL_PATH = "/usr/local/bin/dockup";
+
+/**
+ * Absolute path of the dockup binary — the one systemd must call, and the one
+ * `upgrade` replaces.
+ *
+ * A compiled standalone binary reports itself in `process.execPath`; running from
+ * source (`bun src/main.ts`) reports the bun binary instead, in which case the
+ * only sensible answer is the path the binary is installed at.
+ */
+export const resolveBinaryPath = (): string =>
+  basename(process.execPath) === "dockup" ? process.execPath : DEFAULT_INSTALL_PATH;
 
 /**
  * Convert bytes values into readable format

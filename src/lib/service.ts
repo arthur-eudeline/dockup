@@ -1,28 +1,13 @@
-import { basename } from "node:path";
-
 import { $ } from "bun";
 import { Effect } from "effect";
 
 import { DOCKUP_SHELL_USER } from "./config";
 import { ShellCommandFailureError } from "./errors";
+import { resolveBinaryPath } from "./utils";
 
 export const SERVICE_NAME = "dockup-auto-backup";
 export const SERVICE_PATH = `/etc/systemd/system/${SERVICE_NAME}.service`;
 export const TIMER_PATH = `/etc/systemd/system/${SERVICE_NAME}.timer`;
-
-/** Where `upload.sh` installs the compiled binary. */
-const DEFAULT_INSTALL_PATH = "/usr/local/bin/dockup";
-
-/**
- * Absolute path to the dockup binary for `ExecStart` — systemd refuses a unit
- * whose executable path is relative (`Executable path is not absolute`).
- *
- * A compiled standalone binary reports itself in `process.execPath`; running from
- * source (`bun src/main.ts`) reports the bun binary instead, in which case the
- * unit points at the install path the deploy script uses.
- */
-const resolveExecStart = (): string =>
-  basename(process.execPath) === "dockup" ? process.execPath : DEFAULT_INSTALL_PATH;
 
 /**
  * Writes a file under `/etc/systemd/system`, which needs root.
@@ -41,6 +26,10 @@ const writeSystemFile = (path: string, content: string): Effect.Effect<void, She
       }),
   });
 
+/**
+ * `ExecStart` must be an absolute path — systemd refuses the unit otherwise
+ * (`Executable path is not absolute`) — hence `resolveBinaryPath()`.
+ */
 export const writeServiceFile = () =>
   writeSystemFile(
     SERVICE_PATH,
@@ -50,7 +39,7 @@ After=network.target docker.service
 
 [Service]
 Type=oneshot
-ExecStart=${resolveExecStart()} backup
+ExecStart=${resolveBinaryPath()} backup
 User=${DOCKUP_SHELL_USER}
 Group=${DOCKUP_SHELL_USER}
 `

@@ -73,6 +73,30 @@ export const safeSpinner = <A, E extends AnyTaggedError, R>(
     );
   });
 
+/**
+ * Runs a step under a spinner, renders its outcome, and propagates its failure.
+ *
+ * Same shape as {@link taskSpinner} without the skip branch — so the success
+ * value keeps its type and the caller can go on using it.
+ */
+export const stepSpinner = <A, E extends AnyTaggedError, R>(
+  effect: Effect.Effect<A, E, R>,
+  args: {
+    title: string;
+    onSuccess: (result: A) => string;
+    onError: (error: E) => string;
+  }
+): Effect.Effect<A, E, R> =>
+  Effect.gen(function* _stepSpinner() {
+    const s = spinner();
+    s.start(args.title);
+
+    return yield* effect.pipe(
+      Effect.tapError((error) => Effect.sync(() => s.error(args.onError(error)))),
+      Effect.tap((result) => Effect.sync(() => s.stop(args.onSuccess(result))))
+    );
+  });
+
 export const taskSpinner = <A, E extends AnyTaggedError, R>(
   effect: Effect.Effect<A, E, R>,
   args: {
