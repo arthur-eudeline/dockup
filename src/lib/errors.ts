@@ -57,6 +57,21 @@ export class ResticRepoNotInitializedError extends Data.TaggedError("RESTIC_REPO
   message: string;
 }> {}
 
+/**
+ * Raised when a database dump piped into `restic backup --stdin` carried zero
+ * byte. `pipefail` already catches a dump that *exits* non-zero; this covers the
+ * one that exits 0 having written nothing. Either way an empty snapshot must
+ * never be recorded as a successful backup — the loss would only surface at
+ * restore time.
+ */
+export class EmptyBackupError extends Data.TaggedError("EMPTY_BACKUP_ERROR")<{
+  backupName: string;
+}> {
+  override get message() {
+    return `The dump for "${this.backupName}" produced 0 byte — refusing to record an empty snapshot as a successful backup.`;
+  }
+}
+
 export class PermissionError extends Data.TaggedError("PERMISSION_ERROR")<{
   cause: unknown;
   message: string;

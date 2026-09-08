@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { ShellCommandFailureError, ContainerBackupInfosParsingError } from "./errors";
 import { ParsingError, PermissionError, UndefinedVariableError } from "./errors";
 import type { ResticConf } from "./restic";
-import { getShellOutput } from "./utils";
+import { getShellOutput, sh, shellQuote } from "./utils";
 
 /**
  * Labels used by dockup to find out what containers to backup and how
@@ -24,7 +24,7 @@ const LABELS = {
 export const listBackupEnabledContainerIds = (): Effect.Effect<string[], ParsingError | ShellCommandFailureError> =>
   Effect.gen(function* _listBackupEnabledContainerIds() {
     const result = yield* getShellOutput(
-      `docker ps --filter "label=${LABELS.BACKUP_ENABLED}=true" --format {{.ID}}`
+      sh`docker ps --filter label=${LABELS.BACKUP_ENABLED}=true --format '{{.ID}}'`
     ).pipe(Effect.map((r) => r.split("\n").filter((line) => line.length > 0)));
 
     const { data, error } = z.string().array().safeParse(result);
@@ -72,7 +72,7 @@ const getContainerBackupConfig = (
 ): Effect.Effect<ContainerBackupConfig, ShellCommandFailureError | ParsingError, never> =>
   Effect.gen(function* _getContainerBackupInfos() {
     // Gets the backupName and type
-    const output = yield* getShellOutput(`docker inspect --format '{{ json .Config.Labels }}' ${containerId}`);
+    const output = yield* getShellOutput(sh`docker inspect --format '{{ json .Config.Labels }}' ${containerId}`);
     const json = yield* Effect.try({
       try: () => JSON.parse(output),
       catch: () =>
@@ -153,7 +153,7 @@ export const getContainerVolumes = (
   containerId: string
 ): Effect.Effect<VolumeData[], ShellCommandFailureError | ParsingError, never> =>
   Effect.gen(function* _getContainerVolumes() {
-    const output = yield* getShellOutput(`docker inspect --format='{{json .Mounts}}' ${containerId}`);
+    const output = yield* getShellOutput(sh`docker inspect --format='{{json .Mounts}}' ${containerId}`);
 
     const json = yield* Effect.try({
       try: () => JSON.parse(output),
@@ -177,28 +177,33 @@ export const getContainerVolumes = (
     return data;
   });
 
+/**
+ * Builds the `-v` flags mounting a container's volumes into the restic helper
+ * container. Names and paths come from `docker inspect`, so each is quoted.
+ */
 export const formatVolumeToArgs = (volumes: VolumeData[]): Effect.Effect<string> =>
   Effect.succeed(
-    volumes
-      .map((v) => {
-        if (v.Type === "volume") {
-          return `-v ${v.Name}:${v.Destination}:rw`;
-        }
-
-        return `-v ${v.Source}:${v.Destination}:rw`;
-      })
-      .join(" ")
+    volumes.map((v) => `-v ${shellQuote(`${v.Type === "volume" ? v.Name : v.Source}:${v.Destination}:rw`)}`).join(" ")
   );
 
-export const formatResticConfigToEnvArgs = (conf: ResticConf): Effect.Effect<string> =>
-  Effect.succeed(
-    [
-      `-e AWS_ACCESS_KEY_ID=${conf.AWS_ACCESS_KEY_ID}`,
-      `-e AWS_SECRET_ACCESS_KEY=${conf.AWS_SECRET_ACCESS_KEY}`,
-      `-e RESTIC_PASSWORD=${conf.RESTIC_PASSWORD}`,
-      `-e RESTIC_REPOSITORY=${conf.RESTIC_REPOSITORY.replace("localhost", "host.docker.internal")}`,
-    ].join(" ")
-  );
+/**
+ * Builds the `-e` flags for the restic helper container.
+ *
+ * The values are deliberately left out: `docker run -e NAME` (no `=`) makes the
+ * daemon pull the value from the client's own environment. Spelling them out
+ * here would put the S3 keys and the restic password in the process table for
+ * every local user, and in any error message quoting the command.
+ * The caller must therefore pass the same env to the shell running this command.
+ */
+export const RESTIC_ENV_VAR_NAMES = [
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "RESTIC_PASSWORD",
+  "RESTIC_REPOSITORY",
+] as const satisfies readonly (keyof ResticConf)[];
+
+export const formatResticConfigToEnvArgs = (): Effect.Effect<string> =>
+  Effect.succeed(RESTIC_ENV_VAR_NAMES.map((name) => `-e ${name}`).join(" "));
 
 /**
  * Gets an environment variable from a Docker container
@@ -213,7 +218,7 @@ export const getContainerEnvVariables = (
   containerId: string
 ): Effect.Effect<Record<string, string>, ShellCommandFailureError | UndefinedVariableError | ParsingError> =>
   Effect.gen(function* _getContainerEnvVariable() {
-    const result = yield* getShellOutput(`docker exec ${containerId} env`);
+    const result = yield* getShellOutput(sh`docker exec ${containerId} env`);
     return yield* Effect.try({
       try: () =>
         Object.fromEntries(
@@ -251,7 +256,7 @@ export const getContainerEnvVariable = (
 
     // If the variable is stored in a file (e.g. with docker secrets) reads the file
     if (result && file) {
-      result = yield* getShellOutput(`docker exec ${containerId} cat ${result}`);
+      result = yield* getShellOutput(sh`docker exec ${containerId} cat ${result}`);
     }
 
     return result;

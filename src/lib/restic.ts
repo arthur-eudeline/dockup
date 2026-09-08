@@ -5,7 +5,8 @@ import { z } from "zod";
 
 import type { Config } from "./config";
 import { ConfigTag } from "./effect";
-import { ParsingError, ShellCommandFailureError, ResticRepoNotInitializedError } from "./errors";
+import { EmptyBackupError, ParsingError, ShellCommandFailureError, ResticRepoNotInitializedError } from "./errors";
+import { registerSecret } from "./redact";
 import { formatBytes, formatDuration, formatHumanDate } from "./utils";
 
 // oxlint-disable-next-line typescript/consistent-type-definitions
@@ -22,11 +23,18 @@ export type ResticConf = {
  * @returns The restic environment variables
  */
 export const configToResticEnv = (config: Config): Effect.Effect<ResticConf> =>
-  Effect.succeed({
-    AWS_ACCESS_KEY_ID: config.AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY: config.AWS_SECRET_ACCESS_KEY,
-    RESTIC_PASSWORD: config.RESTIC_PASSWORD,
-    RESTIC_REPOSITORY: config.RESTIC_REPOSITORY,
+  Effect.sync(() => {
+    // Single choke point for the restic credentials: register them for redaction
+    // here so they can never reach a log line, a rendered error or Discord.
+    registerSecret(config.AWS_SECRET_ACCESS_KEY);
+    registerSecret(config.RESTIC_PASSWORD);
+
+    return {
+      AWS_ACCESS_KEY_ID: config.AWS_ACCESS_KEY_ID,
+      AWS_SECRET_ACCESS_KEY: config.AWS_SECRET_ACCESS_KEY,
+      RESTIC_PASSWORD: config.RESTIC_PASSWORD,
+      RESTIC_REPOSITORY: config.RESTIC_REPOSITORY,
+    };
   });
 
 /**
@@ -44,7 +52,7 @@ export const restic = (args: string[]): Effect.Effect<number, ShellCommandFailur
     return yield* Effect.tryPromise({
       try: () =>
         $`restic ${args}`
-          .env(env)
+          .env({ ...process.env, ...env })
           .nothrow()
           .then((v) => v.exitCode),
       catch: (e) =>
@@ -144,7 +152,9 @@ export const resticCleanUp = (): Effect.Effect<ResticCleanUpStructuredOutput, Sh
 
     const output = yield* Effect.tryPromise({
       try: () =>
-        $`restic forget --group-by tags --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --json`.env(env).text(),
+        $`restic forget --group-by tags --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --json`
+          .env({ ...process.env, ...env })
+          .text(),
       catch: (e) => new ShellCommandFailureError({ cause: e, message: `The restic forget command failed` }),
     });
 
@@ -156,8 +166,18 @@ export const resticCleanUp = (): Effect.Effect<ResticCleanUpStructuredOutput, Sh
  */
 const RESTIC_BACKUP_OUTPUT_SCHEMA = z.object({
   data_added: z.number(),
+  total_bytes_processed: z.number(),
   total_duration: z.number(),
 });
+
+interface ParseResticBackupOutputOptions {
+  /**
+   * Fail with an {@link EmptyBackupError} when restic processed 0 byte.
+   * Set for `--stdin` database dumps, where an empty stream can only mean the
+   * dump produced nothing; an empty *volume* set is legitimate.
+   */
+  rejectEmpty?: boolean;
+}
 
 /**
  * Parses the restic backup command output to a structured object
@@ -166,17 +186,11 @@ const RESTIC_BACKUP_OUTPUT_SCHEMA = z.object({
  */
 export const parseResticBackupOutput = (
   backupName: string,
-  o: string
-): Effect.Effect<ResticSuccessfulBackupStructuredOutput, ParsingError, never> =>
+  o: string,
+  options: ParseResticBackupOutputOptions = {}
+): Effect.Effect<ResticSuccessfulBackupStructuredOutput, ParsingError | EmptyBackupError, never> =>
   Effect.gen(function* _parseResticBackupOutput() {
-    const output = yield* Effect.try({
-      try: () => o.trim().split("\n").at(-1),
-      catch: (e) =>
-        new ParsingError({
-          cause: e,
-          message: "The restic backup output parsing failed : output is malformed, cannot get the content",
-        }),
-    });
+    const output = o.trim().split("\n").at(-1);
 
     if (!output) {
       return yield* Effect.fail(
@@ -201,6 +215,10 @@ export const parseResticBackupOutput = (
           message: `The restic backup command output is not valid :\n${z.prettifyError(error)}`,
         })
       );
+    }
+
+    if (options.rejectEmpty && data.total_bytes_processed === 0) {
+      return yield* Effect.fail(new EmptyBackupError({ backupName }));
     }
 
     return yield* Effect.succeed({
@@ -268,7 +286,7 @@ export const listSnapshots = (
     const env = yield* configToResticEnv(config);
 
     const output = yield* Effect.tryPromise({
-      try: () => $`restic snapshots --tag ${tag} --json`.env(env).text(),
+      try: () => $`restic snapshots --tag ${tag} --json`.env({ ...process.env, ...env }).text(),
       catch: (e) =>
         new ShellCommandFailureError({ cause: e, message: "The restic snapshot list command error failed" }),
     });

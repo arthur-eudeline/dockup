@@ -15,7 +15,8 @@ const HINTS: Record<string, string> = {
   RESTIC_REPO_NOT_INITIALIZED_ERROR: `Run ${chalk.yellow("dockup restic init")} to initialize the S3 repository.`,
   PERMISSION_ERROR: `Add your user to the ${chalk.yellow("docker")} group and re-log, or run ${chalk.yellow("dockup service init")}.`,
   FILE_SYSTEM_PERMISSION_ERROR: `Re-run with enough privileges to write the config file.`,
-  SHELL_COMMAND_FAILURE_ERROR: `Check that ${chalk.yellow("docker")} and ${chalk.yellow("restic")} are installed and on your PATH.`,
+  SHELL_COMMAND_FAILURE_ERROR: `Check that ${chalk.yellow("docker")}, ${chalk.yellow("restic")} and ${chalk.yellow("bash")} are installed and on your PATH.`,
+  EMPTY_BACKUP_ERROR: `The dump command wrote nothing — check the container is up and its DB credentials are the ones dockup reads from its environment.`,
 };
 
 const isTagged = (u: unknown): u is AnyTaggedError =>

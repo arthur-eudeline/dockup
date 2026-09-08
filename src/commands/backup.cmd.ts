@@ -31,7 +31,7 @@ const backupOne = (
     const backup = Effect.gen(function* _backup() {
       switch (container.type) {
         case "mariadb": {
-          return yield* backupMariaDB(container);
+          return yield* backupMariaDB(container, task);
         }
         case "postgres": {
           return yield* backupPostgres(container, task);

@@ -1,4 +1,3 @@
-import { $ } from "bun";
 import chalk from "chalk";
 import { Effect } from "effect";
 
@@ -11,12 +10,13 @@ import {
 } from "./docker";
 import type { ContainerBackupConfig } from "./docker";
 import { ConfigTag } from "./effect";
-import type { ParsingError } from "./errors";
-import { ShellCommandFailureError, UndefinedVariableError } from "./errors";
+import type { EmptyBackupError, ParsingError , ShellCommandFailureError} from "./errors";
+import { UndefinedVariableError } from "./errors";
+import { registerSecret } from "./redact";
 import { configToResticEnv, parseResticBackupOutput } from "./restic";
 import type { ResticSuccessfulBackupStructuredOutput } from "./restic";
 import type { TaskLog } from "./types";
-import { streamShellOutput } from "./utils";
+import { raw, sh, shellQuote, streamShellOutput } from "./utils";
 
 /**
  * Gets the required mariadb required env variables
@@ -50,25 +50,25 @@ const getMariadbEnvVariables = (containerId: string) =>
       Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => Effect.succeed(null))
     );
 
-    if (!password && !passwordFile) {
+    const resolved = passwordFile ?? password;
+    if (!resolved) {
       return yield* Effect.fail(new UndefinedVariableError({ variable: "MARIADB_PASSWORD | MARIADB_PASSWORD_FILE" }));
     }
 
-    return yield* Effect.succeed({
-      user,
-      database,
-      password: passwordFile ?? password,
-    });
+    yield* Effect.sync(() => registerSecret(resolved));
+
+    return { user, database, password: resolved };
   });
 
 /**
  * Backup a MariaDB database using the mariadb-dump command
  */
 export const backupMariaDB = (
-  container: ContainerBackupConfig
+  container: ContainerBackupConfig,
+  logger: TaskLog
 ): Effect.Effect<
   ResticSuccessfulBackupStructuredOutput,
-  ShellCommandFailureError | UndefinedVariableError | ParsingError,
+  ShellCommandFailureError | UndefinedVariableError | ParsingError | EmptyBackupError,
   ConfigTag
 > =>
   Effect.gen(function* _backupMariaDB() {
@@ -76,19 +76,16 @@ export const backupMariaDB = (
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 
-    const result = yield* Effect.tryPromise({
-      try: () =>
-        $`docker exec ${container.id} mariadb-dump -u ${mdb.user} --password="${mdb.password}" --databases ${mdb.database} --skip-comments -C | restic backup --stdin --stdin-filename "${container.backupName}.sql" --tag "${container.backupName}" --skip-if-unchanged --json --host ${container.backupName}`
-          .env(env)
-          .text(),
-      catch: (e) =>
-        new ShellCommandFailureError({
-          cause: e,
-          message: `The mariadb-dump command failed for the backup ${container.backupName} on the container ${container.id}`,
-        }),
+    // The password travels as MYSQL_PWD through the environment rather than as
+    // `--password=…`, keeping it out of the process table and of any error
+    // message quoting the command.
+    const output = yield* streamShellOutput({
+      cmd: sh`docker exec -e MYSQL_PWD ${container.id} mariadb-dump -u ${mdb.user} --databases ${mdb.database} --skip-comments | restic backup --stdin --stdin-filename ${`${container.backupName}.sql`} --tag ${container.backupName} --skip-if-unchanged --json --host ${container.backupName}`,
+      env: { ...env, MYSQL_PWD: mdb.password },
+      logger,
     });
 
-    return yield* parseResticBackupOutput(container.backupName, result);
+    return yield* parseResticBackupOutput(container.backupName, output, { rejectEmpty: true });
   });
 
 /**
@@ -109,8 +106,10 @@ export const restoreMariaDB = (
     const env = yield* configToResticEnv(config);
 
     yield* streamShellOutput({
-      cmd: `restic dump ${snapshotId} /${container.backupName}.sql | docker exec -i ${container.id} mariadb -u ${mdb.user} --password="${mdb.password}"`,
-      env,
+      // The dump was taken with `--databases`, so it carries its own CREATE/USE:
+      // no target database is passed here.
+      cmd: sh`restic dump ${snapshotId} ${`/${container.backupName}.sql`} | docker exec -i -e MYSQL_PWD ${container.id} mariadb -u ${mdb.user}`,
+      env: { ...env, MYSQL_PWD: mdb.password },
       logger,
     });
   });
@@ -135,15 +134,14 @@ const getPostgresEnvVariables = (containerId: string) =>
       Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => Effect.succeed(null))
     );
 
-    if (!password && !passwordFile) {
+    const resolved = passwordFile ?? password;
+    if (!resolved) {
       return yield* Effect.fail(new UndefinedVariableError({ variable: "POSTGRES_PASSWORD | POSTGRES_PASSWORD_FILE" }));
     }
 
-    return yield* Effect.succeed({
-      user,
-      database,
-      password: passwordFile ?? password,
-    });
+    yield* Effect.sync(() => registerSecret(resolved));
+
+    return { user, database, password: resolved };
   });
 
 /**
@@ -157,7 +155,7 @@ export const backupPostgres = (
   logger: TaskLog
 ): Effect.Effect<
   ResticSuccessfulBackupStructuredOutput,
-  UndefinedVariableError | ShellCommandFailureError | ParsingError,
+  UndefinedVariableError | ShellCommandFailureError | ParsingError | EmptyBackupError,
   ConfigTag
 > =>
   Effect.gen(function* _backupPostgres() {
@@ -165,13 +163,16 @@ export const backupPostgres = (
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 
+    // `-U`/`-d` rather than a `postgresql://user:password@…` URI: the password
+    // goes through PGPASSWORD (out of the process table), and a `@`, `/` or `#`
+    // in the user or database name no longer needs percent-encoding to parse.
     const output = yield* streamShellOutput({
-      cmd: `docker exec ${container.id} pg_dump --clean --if-exists --no-comments --no-owner --no-privileges -d "postgresql://${pg.user}:${pg.password}@$localhost:5432/${pg.database}" | restic backup --stdin --stdin-filename "${container.backupName}.sql" --tag "${container.backupName}" --skip-if-unchanged --json --host ${container.backupName}`,
-      env,
+      cmd: sh`docker exec -e PGPASSWORD ${container.id} pg_dump --clean --if-exists --no-comments --no-owner --no-privileges -U ${pg.user} -d ${pg.database} | restic backup --stdin --stdin-filename ${`${container.backupName}.sql`} --tag ${container.backupName} --skip-if-unchanged --json --host ${container.backupName}`,
+      env: { ...env, PGPASSWORD: pg.password },
       logger,
     });
 
-    return yield* parseResticBackupOutput(container.backupName, output);
+    return yield* parseResticBackupOutput(container.backupName, output, { rejectEmpty: true });
   });
 
 /**
@@ -192,11 +193,21 @@ export const restorePostgres = (
     const env = yield* configToResticEnv(config);
 
     yield* streamShellOutput({
-      cmd: `restic dump ${snapshotId} /${container.backupName}.sql | docker exec -i ${container.id} psql "postgresql://${pg.user}:${pg.password}@$localhost:5432/${pg.database}"`,
-      env,
+      cmd: sh`restic dump ${snapshotId} ${`/${container.backupName}.sql`} | docker exec -i -e PGPASSWORD ${container.id} psql -v ON_ERROR_STOP=1 -U ${pg.user} -d ${pg.database}`,
+      env: { ...env, PGPASSWORD: pg.password },
       logger,
     });
   });
+
+/**
+ * Names the throwaway `restic/restic` container.
+ *
+ * Unique per operation and per run: the previous fixed `dockup-restic-backup`
+ * was reused for restores too, and a leftover from an interrupted run made the
+ * next one fail on a name collision.
+ */
+const helperContainerName = (operation: "backup" | "restore", backupName: string): string =>
+  `dockup-restic-${operation}-${backupName.replaceAll(/[^a-zA-Z0-9_.-]/g, "-")}-${process.pid}`;
 
 /**
  * Backup volumes of a container
@@ -207,9 +218,8 @@ export const backupVolumes = (
   container: ContainerBackupConfig,
   logger: TaskLog
 ): Effect.Effect<
-  // ResticSuccessfulVolumeBackupStructuredOutput[],
   ResticSuccessfulBackupStructuredOutput,
-  ShellCommandFailureError | UndefinedVariableError | ParsingError,
+  ShellCommandFailureError | UndefinedVariableError | ParsingError | EmptyBackupError,
   ConfigTag
 > =>
   Effect.gen(function* _backupVolumes() {
@@ -218,17 +228,15 @@ export const backupVolumes = (
 
     const volumes = yield* getContainerVolumes(container.id);
     const volumeArgs = yield* formatVolumeToArgs(volumes);
-    const volumeDests = volumes.map((v) => v.Destination).join(" ");
-    const envArgs = yield* formatResticConfigToEnvArgs(env);
+    const volumeDests = volumes.map((v) => shellQuote(v.Destination)).join(" ");
+    const envArgs = yield* formatResticConfigToEnvArgs();
 
     const output = yield* streamShellOutput({
       logger,
-      cmd: `docker run --rm \
-  --name dockup-restic-backup \
-  --network host \
-  ${volumeArgs} \
-  ${envArgs} \
-  restic/restic:latest backup ${volumeDests} --tag ${container.backupName} --json --host ${container.backupName}`,
+      // `env` is passed through so the `-e NAME` flags above resolve from this
+      // process' environment instead of spelling the credentials on the command line.
+      env,
+      cmd: sh`docker run --rm --name ${helperContainerName("backup", container.backupName)} --network host ${raw(volumeArgs)} ${raw(envArgs)} restic/restic:latest backup ${raw(volumeDests)} --tag ${container.backupName} --json --host ${container.backupName}`,
     });
 
     return yield* parseResticBackupOutput(container.backupName, output);
@@ -251,7 +259,7 @@ export const restoreVolumes = (
 
     const stoppingLogger = logger.group(`Stopping container ${chalk.yellow(container.id)}`);
     yield* streamShellOutput({
-      cmd: `docker stop ${container.id}`,
+      cmd: sh`docker stop ${container.id}`,
       logger: stoppingLogger,
       onError: () => stoppingLogger.error(`Failed to stop container ${chalk.yellow(container.id)}`),
       onSuccess: () => stoppingLogger.success(chalk.green(`Container ${chalk.yellow(container.id)} stopped.`)),
@@ -263,8 +271,7 @@ export const restoreVolumes = (
     // runs this as an uninterruptible finalizer; errors here are swallowed so it
     // can never mask the original failure.
     const restart = streamShellOutput({
-      cmd: `docker start ${container.id}`,
-      env,
+      cmd: sh`docker start ${container.id}`,
       logger: startLogger,
       onError: () => startLogger.error(`Failed to restart container ${chalk.yellow(container.id)}`),
       onSuccess: () =>
@@ -274,16 +281,13 @@ export const restoreVolumes = (
     const restore = Effect.gen(function* _restore() {
       const volumes = yield* getContainerVolumes(container.id);
       const volumeArgs = yield* formatVolumeToArgs(volumes);
-      const envArgs = yield* formatResticConfigToEnvArgs(env);
+      const envArgs = yield* formatResticConfigToEnvArgs();
+      const includeArgs = volumes.map((v) => `--include ${shellQuote(v.Destination)}`).join(" ");
 
       yield* streamShellOutput({
         logger,
-        cmd: `docker run --rm \
-  --name dockup-restic-backup \
-  --network host \
-  ${volumeArgs} \
-  ${envArgs} \
-  restic/restic:latest restore ${snapshotId} --target / ${volumes.map((_v) => `--include ${_v.Destination}`).join(" ")} --json`,
+        env,
+        cmd: sh`docker run --rm --name ${helperContainerName("restore", container.backupName)} --network host ${raw(volumeArgs)} ${raw(envArgs)} restic/restic:latest restore ${snapshotId} --target / ${raw(includeArgs)} --json`,
       });
     });
 

@@ -5,20 +5,76 @@ import { $ } from "bun";
 import { Effect } from "effect";
 
 import { ShellCommandFailureError, FileSystemPermissionError } from "./errors";
+import { redact } from "./redact";
+
+/**
+ * Marker for a fragment that must be interpolated verbatim by {@link sh} instead
+ * of being quoted as a single word — a pre-built list of flags, typically.
+ */
+const RAW = Symbol("dockup.shell.raw");
+
+export interface ShellFragment {
+  readonly [RAW]: string;
+}
+
+/**
+ * Opts a fragment out of {@link sh}'s quoting. Only ever use it on a string this
+ * codebase built itself out of already-quoted parts — never on a value read from
+ * a container's labels or environment.
+ */
+export const raw = (fragment: string): ShellFragment => ({ [RAW]: fragment });
+
+/**
+ * Single-quotes a value so the shell takes it literally, whatever it contains
+ * (`$`, backticks, quotes, newlines…).
+ */
+export const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+
+/**
+ * Tagged template building a shell command with every interpolated value quoted.
+ * Values reaching these commands come from `docker inspect` / `docker exec env`
+ * (volume paths, DB users, passwords), so they are attacker-influenced input as
+ * far as this process is concerned.
+ *
+ * @example sh`docker exec ${containerId} cat ${path}`
+ */
+export const sh = (strings: TemplateStringsArray, ...values: (string | ShellFragment)[]): string => {
+  let output = strings[0] ?? "";
+
+  for (const [index, value] of values.entries()) {
+    output += typeof value === "string" ? shellQuote(value) : value[RAW];
+    output += strings[index + 1] ?? "";
+  }
+
+  return output;
+};
+
+/**
+ * Runs the command through `bash` with `pipefail` on.
+ *
+ * Bun's built-in shell reports only the *last* command of a pipeline, so
+ * `pg_dump … | restic backup --stdin` exited 0 even when the dump had failed —
+ * committing an empty snapshot reported as a success. Every pipeline dockup runs
+ * is a backup or a restore, so a broken left-hand side must fail the whole thing.
+ */
+const bash = (cmd: string) => $`bash -o pipefail -c ${cmd}`;
+
+/** Environment handed to a child process: the ambient one plus explicit overrides. */
+const childEnv = (env?: Record<string, string>): Record<string, string | undefined> => ({ ...process.env, ...env });
 
 /**
  * Executes a shell command and returns its output trimed
- * @param cmd The shell command
+ * @param cmd The shell command — build it with {@link sh} when it interpolates anything
  * @returns The command output
  */
 export const getShellOutput = (cmd: string): Effect.Effect<string, ShellCommandFailureError> =>
   Effect.gen(function* _getShellOutput() {
     const result = yield* Effect.tryPromise({
-      try: () => $`${{ raw: cmd }}`.text(),
+      try: () => bash(cmd).text(),
       catch: (e) =>
         new ShellCommandFailureError({
           cause: e,
-          message: `The command "${cmd}" failed`,
+          message: redact(`The command "${cmd}" failed`),
         }),
     }).pipe(Effect.map((r) => r.trim()));
 
@@ -26,8 +82,8 @@ export const getShellOutput = (cmd: string): Effect.Effect<string, ShellCommandF
   });
 
 interface StreamShellOutputArgs {
+  /** The shell command — build it with {@link sh} when it interpolates anything */
   cmd: string;
-  fileWriter?: Bun.FileSink;
   env?: Record<string, string>;
   logger?: { message: (str: string) => void };
   onError?: (error: unknown) => void;
@@ -39,16 +95,17 @@ export const streamShellOutput = (args: StreamShellOutputArgs): Effect.Effect<st
     const output: string[] = [];
     yield* Effect.tryPromise({
       try: async () => {
-        for await (const line of $`${{ raw: args.cmd }}`.env(args.env ?? {}).lines()) {
-          output.push(line);
-          args.logger?.message(line);
+        for await (const line of bash(args.cmd).env(childEnv(args.env)).lines()) {
+          const safe = redact(line);
+          output.push(safe);
+          args.logger?.message(safe);
         }
       },
       catch: (e) => {
         args.onError?.(e);
         return new ShellCommandFailureError({
           cause: e,
-          message: `The command ${args.cmd} failed`,
+          message: redact(`The command ${args.cmd} failed`),
         });
       },
     });
