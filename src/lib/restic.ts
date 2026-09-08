@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { Config } from "./config";
 import { ConfigTag } from "./effect";
 import { EmptyBackupError, ParsingError, ShellCommandFailureError, ResticRepoNotInitializedError } from "./errors";
-import { registerSecret } from "./redact";
+import { redact, registerSecret } from "./redact";
 import { formatBytes, formatDuration, formatHumanDate } from "./utils";
 
 // oxlint-disable-next-line typescript/consistent-type-definitions
@@ -294,6 +294,12 @@ export const listSnapshots = (
     return yield* parseResticSnapshotListOutput(output);
   });
 
+/**
+ * How long to wait for the repository probe. The former 5s was short enough that
+ * a large repository or a slow S3 endpoint routinely blew through it.
+ */
+const REPO_PROBE_TIMEOUT_MS = 30_000;
+
 export const ensureRepoInitialized = (): Effect.Effect<
   void,
   ShellCommandFailureError | ResticRepoNotInitializedError,
@@ -303,32 +309,56 @@ export const ensureRepoInitialized = (): Effect.Effect<
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 
-    return yield* Effect.tryPromise({
+    const probe = yield* Effect.tryPromise({
       try: async () => {
         const proc = spawn({
           cmd: ["restic", "snapshots"],
           env: { ...process.env, ...env },
-          timeout: 5000,
+          timeout: REPO_PROBE_TIMEOUT_MS,
           stdout: "pipe",
           stderr: "pipe",
         });
 
         await proc.exited;
-        if (proc.exitCode !== 0) {
-          throw new ResticRepoNotInitializedError({
-            cause: "",
-            message: `Restic distant repository does not seems to be initialized.\nTo initialize it, run the following command ${chalk.yellow("dockup restic init")}`,
-          });
-        }
+
+        return {
+          exitCode: proc.exitCode,
+          // Set when the process was killed — by our own timeout, in practice.
+          signalCode: proc.signalCode,
+          stderr: redact((await new Response(proc.stderr).text()).trim()),
+        };
       },
-      catch: (e) => {
-        if (e instanceof ResticRepoNotInitializedError) {
-          return e;
-        }
-        return new ShellCommandFailureError({
+      catch: (e) =>
+        new ShellCommandFailureError({
           cause: e,
-          message: "restic repo initialization command failed (restic snapshots)",
-        });
-      },
+          message: "Failed to run restic — is it installed and on your PATH ?",
+        }),
     });
+
+    // A killed probe says nothing about the repository: reporting "not
+    // initialized" here used to send people to `restic init` against a perfectly
+    // healthy repo that was merely slow to answer.
+    if (probe.signalCode !== null) {
+      return yield* Effect.fail(
+        new ShellCommandFailureError({
+          cause: probe.signalCode,
+          message: `${chalk.yellow("restic snapshots")} did not answer within ${REPO_PROBE_TIMEOUT_MS / 1000}s and was killed. The S3 endpoint may be slow or unreachable — this says nothing about whether the repository is initialized.`,
+        })
+      );
+    }
+
+    if (probe.exitCode !== 0) {
+      return yield* Effect.fail(
+        new ResticRepoNotInitializedError({
+          cause: probe.stderr,
+          message: [
+            `Restic could not open the repository (exit code ${probe.exitCode}).`,
+            probe.stderr,
+            `If it has never been created, run ${chalk.yellow("dockup restic init")}.`,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        })
+      );
+    }
   });

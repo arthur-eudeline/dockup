@@ -21,11 +21,11 @@
 | 8   | ✅ Corrigé  | `ensureWritePermission` ne peut jamais échouer                            | `src/lib/utils.ts:142`        |
 | 9   | ✅ Corrigé  | `$localhost` parasite dans les URI Postgres                               | `src/lib/backup.ts:166,192`   |
 | 10  | ✅ Corrigé  | `host.docker.internal` avec `--network host` ne résout pas sous Linux     | `src/lib/docker.ts:199`       |
-| 11  | 🟡 Bug      | Message Discord vide                                                      | `src/lib/discord.ts:35`       |
+| 11  | ✅ Corrigé  | Message Discord vide                                                      | `src/lib/discord.ts:35`       |
 | 12  | ✅ Corrigé  | `.env()` remplace tout l'environnement — plus de `PATH`, plus de `HOME`   | `src/lib/utils.ts:42`         |
-| 13  | 🟡 Bug      | `ensureRepoInitialized` confond « lent » et « non initialisé »            | `src/lib/restic.ts:288`       |
+| 13  | ✅ Corrigé  | `ensureRepoInitialized` confond « lent » et « non initialisé »            | `src/lib/restic.ts:288`       |
 | 14  | ✅ Corrigé  | `jounalctl`                                                               | `src/lib/service.ts:74`       |
-| 15  | 🟡 Bug      | `backup` ne vérifie ni les droits Docker ni l'état du dépôt               | `src/commands/backup.cmd.ts`  |
+| 15  | ✅ Corrigé  | `backup` ne vérifie ni les droits Docker ni l'état du dépôt               | `src/commands/backup.cmd.ts`  |
 | 16  | 🔵 Qualité  | Code mort, tags Effect, validations sans effet, divers                    | —                             |
 
 ---
@@ -305,7 +305,13 @@ n'existe pas sous Linux sans `--add-host`. Or la cible de production est Linux, 
 tourne déjà en `--network host` (donc `localhost` aurait fonctionné directement). Hack de dev
 qui a fuité en prod ; à retirer ou à conditionner.
 
-### 11. Message Discord vide
+### 11. ✅ Message Discord vide
+
+> **Corrigé.** `formatDiscordReport` accumule dans des chunks et ne pousse que les non-vides ;
+> une ligne dépassant la limite est découpée au lieu d'être envoyée telle quelle. `notifyDiscord`
+> refuse en plus un contenu vide en amont, au lieu de dépenser trois tentatives sur un 400.
+> Vérifié : `formatDiscordReport([])` → `[]` (contre `[""]`), une ligne de 5 000 caractères →
+> 3 chunks tous ≤ 2 000, 60 lignes → 2 chunks sans perte de contenu.
 
 **Emplacement :** `src/lib/discord.ts:35`
 
@@ -334,7 +340,14 @@ Bun résout le binaire lui-même donc les commandes se lancent, mais les sous-pr
 
 **Correctif :** `.env({ ...process.env, ...env })`.
 
-### 13. `ensureRepoInitialized` confond « lent » et « non initialisé »
+### 13. ✅ `ensureRepoInitialized` confond « lent » et « non initialisé »
+
+> **Corrigé.** Le timeout passe de 5 s à 30 s, et surtout les deux cas sont distingués : un
+> process tué par le timeout se reconnaît à `signalCode !== null` (vérifié : timeout →
+> `{exitCode: null, signalCode: "SIGTERM"}`, échec réel → `{exitCode: 1, signalCode: null}`).
+> Un timeout remonte désormais un `ShellCommandFailureError` disant explicitement que ça ne
+> présage rien de l'état du dépôt ; seul un vrai code de sortie non nul donne un
+> `ResticRepoNotInitializedError`, avec le `stderr` de restic (rédigé) dans le message.
 
 **Emplacement :** `src/lib/restic.ts:288-304`
 
@@ -353,7 +366,12 @@ le process est tué, `exitCode !== 0`, et on affiche « le dépôt ne semble pas
 Faute de frappe (`journalctl`). Sans impact aujourd'hui : la fonction est morte, ce qui explique
 que personne ne l'ait vue.
 
-### 15. `backup` ne vérifie ni les droits Docker ni l'état du dépôt
+### 15. ✅ `backup` ne vérifie ni les droits Docker ni l'état du dépôt
+
+> **Corrigé.** `backup` exécute `ensureDockerPermissions()` puis `ensureRepoInitialized()` avant
+> de scanner. Ces préconditions — comme la découverte elle-même — passent par un helper
+> `preflight` qui prévient Discord avant d'abandonner : la commande tournant sans personne
+> devant, un diagnostic clair vaut mieux que N alertes identiques.
 
 **Emplacement :** `src/commands/backup.cmd.ts`
 

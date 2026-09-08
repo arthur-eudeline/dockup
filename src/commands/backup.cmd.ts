@@ -7,9 +7,9 @@ import { backupMariaDB, backupPostgres, backupVolumes } from "../lib/backup";
 import { runCommand } from "../lib/cli";
 import { formatDiscordReport, notifyDiscord } from "../lib/discord";
 import type { ContainerBackupConfig } from "../lib/docker";
-import { listBackupEnabledContainers } from "../lib/docker";
-import type { ConfigTag } from "../lib/effect";
-import { resticCleanUp } from "../lib/restic";
+import { ensureDockerPermissions, listBackupEnabledContainers } from "../lib/docker";
+import type { AnyTaggedError, ConfigTag } from "../lib/effect";
+import { ensureRepoInitialized, resticCleanUp } from "../lib/restic";
 import type { ResticStructuredOutput } from "../lib/restic";
 import type { TaskLog } from "../lib/types";
 
@@ -75,16 +75,25 @@ export const BackupCommand = new Command()
       Effect.gen(function* _backupCommand() {
         const report: Report = yield* Ref.make<ResticStructuredOutput[]>([]);
 
-        const { containers, invalid } = yield* listBackupEnabledContainers().pipe(
-          Effect.catchAll((e) =>
-            Effect.gen(function* _onListError() {
-              yield* notifyDiscord(
-                `🔴 failed to list containers to backup : (\`${e._tag}\`) ${e.message}\n\n(@everyone)`
-              );
-              return yield* Effect.fail(e);
-            })
-          )
-        );
+        /**
+         * Aborts the run on a failure that would otherwise repeat itself for every
+         * container, after telling Discord why. This command runs unattended from
+         * a timer, so one clear diagnostic beats N identical alerts.
+         */
+        const preflight = <A, E extends AnyTaggedError, R>(effect: Effect.Effect<A, E, R>) =>
+          effect.pipe(
+            Effect.tapError((e) =>
+              notifyDiscord(`🔴 backup aborted before it started : (\`${e._tag}\`) ${e.message}\n\n(@everyone)`)
+            )
+          );
+
+        // Same preconditions `restore` and `config check` verify. Without them, a
+        // service account missing from the `docker` group failed once per
+        // container instead of saying so once.
+        yield* preflight(ensureDockerPermissions());
+        yield* preflight(ensureRepoInitialized());
+
+        const { containers, invalid } = yield* preflight(listBackupEnabledContainers());
 
         if (containers.length === 0 && invalid.length === 0) {
           log.warn(`No running container carries the ${chalk.yellow("dockup.backup.enabled=true")} label.`);
