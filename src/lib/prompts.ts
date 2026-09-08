@@ -9,12 +9,19 @@ import type { AnyTaggedError } from "./effect";
 import { PromptCancelledError } from "./errors";
 import type { ResticSnapshotItemStructredOutput } from "./restic";
 
-export const promptSelect = <T>(args: SelectOptions<T>): Effect.Effect<T, PromptCancelledError> =>
-  Effect.gen(function* _promptSelect() {
-    const value = yield* Effect.promise(() => select<T>(args));
+/**
+ * Run any `@clack/prompts` prompt as an Effect: a user cancel (Ctrl-C / Esc)
+ * becomes a typed `PromptCancelledError` instead of a bare `process.exit`.
+ */
+export const prompt = <T>(run: () => Promise<T | symbol>): Effect.Effect<T, PromptCancelledError> =>
+  Effect.gen(function* _prompt() {
+    const value = yield* Effect.promise(run);
     if (isCancel(value)) return yield* Effect.fail(new PromptCancelledError({}));
     return value;
   });
+
+export const promptSelect = <T>(args: SelectOptions<T>): Effect.Effect<T, PromptCancelledError> =>
+  prompt(() => select<T>(args));
 
 export const promptSelectContainer = (
   containers: ContainerBackupConfig[]
