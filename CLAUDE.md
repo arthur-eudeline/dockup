@@ -33,9 +33,11 @@ pushed. Versions and `CHANGELOG.md` come from the conventional commits (see **Re
 - `dockup backup` — scan running containers, back up each labeled one, run retention
   cleanup, post a Discord report, and escalate any backup that has gone 3 days without a
   successful run.
-- `dockup restore` — interactive: pick a container, pick a snapshot, restore it.
+- `dockup restore` — interactive: pick a target, pick a snapshot, restore it.
 - `dockup restic [args...]` — passthrough to the `restic` binary with repo/credentials env injected.
 - `dockup config init` / `dockup config check` (alias `doctor`) — manage/validate the config file.
+- `dockup config target add` / `list` (alias `ls`) / `remove` (alias `rm`); the group is also aliased
+  `targets`. Declares the postgres databases running on the host, outside docker.
 - `dockup service init` (alias `setup`) / `test` / `remove` (alias `uninstall`); the `service`
   group is also aliased `cron`. Installs a systemd service + timer for a daily 02:00 backup.
 - `dockup upgrade` (alias `update`, flags `--check` / `--force`) — download the latest GitHub
@@ -72,9 +74,40 @@ the clearest reference. Multi-step commands choose a failure policy explicitly: 
 
 **Config file.** Encrypted JSON at `/etc/dockup.conf`, AES-256-GCM via `src/lib/crypto.ts`,
 schema-validated with Zod in `src/lib/config.ts` (`CONFIG_SCHEMA`: S3 creds, `RESTIC_REPOSITORY`
-`s3:` URL, `RESTIC_PASSWORD` ≥24 chars, Discord webhook). Note `crypto.ts` uses a hardcoded
-`KEY` constant — encryption is obfuscation-at-rest, not a real secret boundary. File perms are
-`640 $USER:dockup` so the `dockup` system user can read it.
+`s3:` URL, `RESTIC_PASSWORD` ≥24 chars, Discord webhook, plus the `hosts` array below). Note
+`crypto.ts` uses a hardcoded `KEY` constant — encryption is obfuscation-at-rest, not a real secret
+boundary. File perms are `640 $USER:dockup` so the `dockup` system user can read it — and
+`writeConfig` chowns to the `dockup` group whenever that user exists, because rewriting the file
+(adding a host target) otherwise handed it back to the invoking user's own group and cut the
+nightly run off from its credentials.
+
+**Targets: containers and hosts** (`src/lib/targets.ts`, `src/lib/backup.ts`). A container declares
+itself through its labels and carries its own credentials; a postgres running on the _host_ has
+neither, so it is declared in the config file instead — as a `HostTarget` (`CONFIG_SCHEMA.hosts[]`,
+defaulted so a config written before it existed still parses), one of two scopes discriminated by
+`scope`: `"database"` names exactly one `database`; `"instance"` names none and backs up every
+database the server reports instead (`discoveryDatabase` to connect for the catalog query, default
+`"postgres"`; `exclude[]` for exact names to skip — the admin `postgres` database itself is _not_
+auto-excluded, since it is a real, potentially non-empty database like any other).
+
+A `HostTarget` cannot be backed up directly — an `"instance"` one does not even name a database
+until the server is asked — so `resolveHostTargets` (`backup.ts`) resolves every declared one into
+concrete, single-database `HostBackupTarget`s first: trivially for `"database"` scope, by running
+`DISCOVER_DATABASES_QUERY` (`datallowconn and not datistemplate`) against `discoveryDatabase` for
+`"instance"` scope. An instance target's databases are tagged `<name>-<database>`, so distinct
+databases never collide and a `"database"`-scoped target keeps its exact declared name unchanged.
+Resolution is per-target best-effort (`Effect.partition`, mirroring `listBackupEnabledContainers`
+for containers): one postgres instance being down must not cancel the databases another instance,
+or a container, would still back up — it is reported in `HostDiscovery.invalid` instead.
+
+`BackupTarget` is the union of a container and a _resolved_ `HostBackupTarget`, discriminated by
+`source`, and `mergeTargets` (`targets.ts`, dependency-free — no I/O, no knowledge of `HostTarget`)
+joins the two lists — a name claimed by both wins for the host target, since sharing a name means
+sharing a restic tag (interleaved snapshots, retention pruning across both). Everything downstream
+was already source-agnostic — restic is called with `--host <backupName> --tag <backupName>`, and
+`health.ts` / `state.ts` are keyed by backup name — so only discovery and the dump command had to
+change. `checkHostTarget` (`config check`, `config target add`) probes a declared `HostTarget` the
+same way `backup` will use it — discovery included for `"instance"` scope — before it is trusted.
 
 **Running shell commands (`src/lib/utils.ts`).** `getShellOutput` / `streamShellOutput` are the
 only two ways to shell out, and both run `bash -o pipefail -c` — **not** Bun's built-in shell,
@@ -97,14 +130,20 @@ Discovery shells out to `docker ps`/`docker inspect`; DB credentials are pulled 
 container's own env vars (`docker exec <id> env`), with `*_PASSWORD_FILE` (Docker secrets)
 resolved by `cat`-ing the file inside the container. `listBackupEnabledContainers` returns
 `{ containers, invalid }` — discovery is per-container best-effort, so one unreadable label set
-cannot cancel the whole run; callers must report `invalid` rather than drop it.
+cannot cancel the whole run; callers must report `invalid` rather than drop it. An unreachable
+docker daemon aborts `backup` only when no host target is declared: host targets never go through
+docker, and the container ones simply go unseen, which the staleness rule escalates anyway.
 
 **Backup/restore per type** (`src/lib/backup.ts`):
 
-- `mariadb` / `postgres` — `docker exec` a dump piped into `restic backup --stdin`; restore
-  pipes `restic dump` back into the client. Uses `--host <backupName>` and `--tag <backupName>`.
-  Both dumps parse their output with `rejectEmpty`, so restic processing 0 byte fails with
-  `EmptyBackupError` instead of recording an empty snapshot as a success.
+- `mariadb` / `postgres` — a dump piped into `restic backup --stdin`; restore pipes `restic dump`
+  back into the client. Uses `--host <backupName>` and `--tag <backupName>`. Both dumps parse their
+  output with `rejectEmpty`, so restic processing 0 byte fails with `EmptyBackupError` instead of
+  recording an empty snapshot as a success. The two postgres sources differ only by the prefix of
+  that command — `docker exec -e PGPASSWORD <id> pg_dump …` against a container, plain
+  `pg_dump -h … -p …` against a host target — so `PostgresAccess` builds that pair of fragments per
+  source and the restic side is shared. Both pass `-w`: without it libpq falls back to prompting on
+  /dev/tty when the password is refused, hanging an unattended run instead of failing it.
 - `volumes` — runs `restic/restic` in a throwaway `docker run --network host` with the
   container's mounts bind-mounted in. Restore stops the container, then restores inside an
   `Effect.ensuring` whose finalizer restarts it — so the container comes back up even if the
@@ -164,6 +203,9 @@ invisible.
 
 The `docker`, `restic` and `bash` binaries must be on `PATH` at runtime, and `/var/lib/dockup`
 must be writable by whoever runs `backup` (alerting degrades without it, backups do not).
+A declared host target additionally needs `pg_dump` and `psql` on `PATH` (the postgresql client
+package), at least as recent as the server, and a `pg_hba.conf` line letting the `dockup` user
+authenticate over TCP — `config check` probes both.
 Backup/restore and `service` commands assume a Linux host with systemd and `sudo`; `docker/` holds
 a local compose stack (RustFS as S3, plus labeled postgres/mariadb/wordpress) for exercising the
 tool. Note the

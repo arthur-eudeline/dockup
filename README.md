@@ -38,6 +38,35 @@ dockup upgrade           # download, verify the checksum, replace the binary in 
 `upgrade` refuses any asset the release checksums do not vouch for, and asks for `sudo` only when
 the install directory is not writable by you.
 
+## 🐘 Databases outside docker
+
+A postgres running on the host has no container to carry labels, so it is declared once instead:
+
+```bash
+dockup config target add     # a single database, or every database on the instance
+dockup config target list
+dockup config target remove
+```
+
+`add` asks which of two things the target should cover:
+
+- **a single database** — name, host, port, user, database, password;
+- **the whole instance** — same connection details, minus a specific database; instead dockup asks
+  the server for every database at backup time (`select datname from pg_database where datallowconn
+and not datistemplate`) and backs up each one under its own snapshot tag (`<name>-<database>`), so
+  a database created after the target was declared is picked up automatically next run, without
+  touching the config. Optionally exclude specific database names.
+
+The target is probed before it is saved (for an instance target, that means connecting to every
+database it currently finds), and `dockup config check` re-probes it afterwards. Each resolved
+database then goes through the same nightly run, the same retention policy, the same Discord report
+and the same staleness alerting as any labeled container, and shows up in `dockup restore` next to
+them — one entry per database.
+
+This needs `pg_dump` and `psql` on the host's `PATH` (the postgresql client package), at least as
+recent as the server, and a `pg_hba.conf` that lets the backup user authenticate over TCP. Give it
+a dedicated role rather than `postgres`; the password is stored in `/etc/dockup.conf`.
+
 ## ⚖️ License & Warranty
 
 This tool is distributed for free under the GNU GPL v3 License.

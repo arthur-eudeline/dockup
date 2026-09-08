@@ -4,10 +4,10 @@ import type { SelectOptions } from "@clack/prompts";
 import chalk from "chalk";
 import { Effect } from "effect";
 
-import type { ContainerBackupConfig } from "./docker";
 import type { AnyTaggedError } from "./effect";
 import { PromptCancelledError } from "./errors";
 import type { ResticSnapshotItemStructredOutput } from "./restic";
+import type { BackupTarget } from "./targets";
 
 /**
  * Run any `@clack/prompts` prompt as an Effect: a user cancel (Ctrl-C / Esc)
@@ -23,17 +23,17 @@ export const prompt = <T>(run: () => Promise<T | symbol>): Effect.Effect<T, Prom
 export const promptSelect = <T>(args: SelectOptions<T>): Effect.Effect<T, PromptCancelledError> =>
   prompt(() => select<T>(args));
 
-export const promptSelectContainer = (
-  containers: ContainerBackupConfig[]
-): Effect.Effect<ContainerBackupConfig, PromptCancelledError, never> =>
+export const promptSelectTarget = (targets: BackupTarget[]): Effect.Effect<BackupTarget, PromptCancelledError, never> =>
   promptSelect({
     message: "Choose which backup to restore",
-    options: containers.map((container) => ({
-      label: container.backupName,
-      hint: container.type,
-      value: container,
+    options: targets.map((target) => ({
+      label: target.backupName,
+      // The source matters here: restoring a host target writes straight into a
+      // database nothing else is going to stop first.
+      hint: target.source === "host" ? `${target.type} (host)` : target.type,
+      value: target,
     })),
-  } as SelectOptions<ContainerBackupConfig>);
+  } as SelectOptions<BackupTarget>);
 
 export const promptSelectSnapshot = (snapshots: ResticSnapshotItemStructredOutput[]) =>
   promptSelect({

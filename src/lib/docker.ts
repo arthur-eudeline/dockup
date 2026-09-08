@@ -29,6 +29,9 @@ export const listBackupEnabledContainerIds = (): Effect.Effect<string[], ShellCo
 const BASE_SCHEMA = z.object({
   backupName: z.string(),
   id: z.string(),
+  // Discriminates a container target from a host one (see `targets.ts`): both
+  // end up in the same backup loop, but only this one is reached through docker.
+  source: z.literal("container"),
 });
 
 /**
@@ -72,6 +75,7 @@ const getContainerBackupConfig = (
     const { data, error } = CONTAINER_BACKUP_CONFIG_SCHEMA.safeParse({
       id: containerId,
       backupName: json["dockup.backup.name"],
+      source: "container",
       type: json["dockup.backup.type"],
     });
 

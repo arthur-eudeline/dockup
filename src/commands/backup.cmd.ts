@@ -3,18 +3,21 @@ import chalk from "chalk";
 import { Command } from "commander";
 import { Effect, Ref } from "effect";
 
-import { backupMariaDB, backupPostgres, backupVolumes } from "../lib/backup";
+import { backupMariaDB, backupPostgres, backupVolumes, resolveHostTargets } from "../lib/backup";
 import { runCommand } from "../lib/cli";
 import { deliverDiscordMessages, formatDiscordReport } from "../lib/discord";
 import type { DiscordMessage } from "../lib/discord";
-import type { ContainerBackupConfig } from "../lib/docker";
+import type { ContainerDiscovery } from "../lib/docker";
 import { ensureDockerPermissions, listBackupEnabledContainers } from "../lib/docker";
-import type { AnyTaggedError, ConfigTag } from "../lib/effect";
+import type { AnyTaggedError } from "../lib/effect";
+import { ConfigTag } from "../lib/effect";
 import { applyRun, outcomesFromReport, preflightOutcomes } from "../lib/health";
 import { ensureRepoInitialized, resticCleanUp } from "../lib/restic";
 import type { ResticStructuredOutput } from "../lib/restic";
 import { emptyState, knownBackupNames, readState, STATE_PATH, writeState } from "../lib/state";
 import type { DockupState } from "../lib/state";
+import { mergeTargets } from "../lib/targets";
+import type { BackupTarget } from "../lib/targets";
 import type { TaskLog } from "../lib/types";
 
 type Report = Ref.Ref<ResticStructuredOutput[]>;
@@ -27,26 +30,22 @@ const record = (report: Report, ...lines: ResticStructuredOutput[]) => Ref.updat
 const note = (notes: Notes, line: string) => Ref.update(notes, (acc) => [...acc, line]);
 
 /**
- * Backs up a single container and appends its outcome to the shared report.
+ * Backs up a single target and appends its outcome to the shared report.
  * A failure is caught and turned into a report line so the loop moves on to
- * the next container instead of aborting the whole run.
+ * the next target instead of aborting the whole run.
  */
-const backupOne = (
-  report: Report,
-  container: ContainerBackupConfig,
-  task: TaskLog
-): Effect.Effect<void, never, ConfigTag> =>
+const backupOne = (report: Report, target: BackupTarget, task: TaskLog): Effect.Effect<void, never, ConfigTag> =>
   Effect.gen(function* _backupOne() {
     const backup = Effect.gen(function* _backup() {
-      switch (container.type) {
+      switch (target.type) {
         case "mariadb": {
-          return yield* backupMariaDB(container, task);
+          return yield* backupMariaDB(target, task);
         }
         case "postgres": {
-          return yield* backupPostgres(container, task);
+          return yield* backupPostgres(target, task);
         }
         case "volumes": {
-          return yield* backupVolumes(container, task);
+          return yield* backupVolumes(target, task);
         }
         default: {
           return yield* Effect.dieMessage("Unhandled backup type.");
@@ -57,17 +56,17 @@ const backupOne = (
     yield* backup.pipe(
       Effect.tap((line) =>
         Effect.sync(() =>
-          task.success(`Backuped ${chalk.green(container.backupName)} in ${chalk.yellow(line.totalDuration)}`)
+          task.success(`Backuped ${chalk.green(target.backupName)} in ${chalk.yellow(line.totalDuration)}`)
         )
       ),
       Effect.tap((line) => record(report, line)),
       Effect.catchAll((e) =>
         Effect.zipRight(
-          Effect.sync(() => task.error(`Backup failed ${chalk.red(container.backupName)} : ${e._tag} ${e.message}`)),
+          Effect.sync(() => task.error(`Backup failed ${chalk.red(target.backupName)} : ${e._tag} ${e.message}`)),
           record(report, {
             type: "backup",
             success: false,
-            backupName: container.backupName,
+            backupName: target.backupName,
             message: e.message,
             code: e._tag,
           })
@@ -75,6 +74,12 @@ const backupOne = (
       )
     );
   });
+
+/** How a target is introduced in the task log — a host one has no container id. */
+const describeTarget = (target: BackupTarget): string =>
+  target.source === "host"
+    ? `${chalk.blue(target.backupName)} (${chalk.yellow("host")} ${target.connection.host}:${target.connection.port})`
+    : `${chalk.blue(target.backupName)} (${chalk.yellow(target.id)})`;
 
 export const BackupCommand = new Command()
   .name("backup")
@@ -169,16 +174,62 @@ export const BackupCommand = new Command()
             )
           );
 
-        // Same preconditions `restore` and `config check` verify. Without them, a
-        // service account missing from the `docker` group failed once per
-        // container instead of saying so once.
-        yield* preflight(ensureDockerPermissions());
+        // Nothing can be backed up without a repository, whatever the target.
         yield* preflight(ensureRepoInitialized());
 
-        const { containers, invalid } = yield* preflight(listBackupEnabledContainers());
+        const config = yield* ConfigTag;
 
-        if (containers.length === 0 && invalid.length === 0) {
-          log.warn(`No running container carries the ${chalk.yellow("dockup.backup.enabled=true")} label.`);
+        // Same precondition `restore` and `config check` verify. Without it, a
+        // service account missing from the `docker` group failed once per
+        // container instead of saying so once.
+        const discoverContainers = Effect.gen(function* _discoverContainers() {
+          yield* ensureDockerPermissions();
+          return yield* listBackupEnabledContainers();
+        });
+
+        /**
+         * An unreachable docker daemon aborts the run only when there is nothing
+         * else to back up. Host targets never go through docker, and a night
+         * where they ran is not a night where nothing ran — so the failure is
+         * reported and the container targets simply go unseen, which the
+         * staleness rule already escalates after three days.
+         */
+        const containerDiscovery =
+          config.hosts.length === 0
+            ? yield* preflight(discoverContainers)
+            : yield* discoverContainers.pipe(
+                Effect.catchAll((e) =>
+                  Effect.gen(function* _withoutDocker() {
+                    log.error(`Docker unavailable — container backups skipped : ${e._tag} ${e.message}`);
+                    yield* note(
+                      notes,
+                      `⚠️ docker is unavailable (\`${e._tag}\`) — only the host targets were backed up. ${e.message}`
+                    );
+                    return { containers: [], invalid: [] } satisfies ContainerDiscovery;
+                  })
+                )
+              );
+
+        // Per-target best-effort, same as container discovery : one broken
+        // postgres instance must not cancel the databases another one, or a
+        // container, would still back up.
+        const hostDiscovery = yield* resolveHostTargets(config.hosts);
+
+        const { containers, invalid } = containerDiscovery;
+        const { collisions, targets } = mergeTargets(hostDiscovery.targets, containers);
+
+        for (const name of collisions) {
+          log.warn(`Two targets claim the backup name ${chalk.yellow(name)} — the container one is ignored.`);
+          yield* note(
+            notes,
+            `⚠️ \`${name}\` is declared both as a host target and on a running container — the container was ignored.`
+          );
+        }
+
+        if (targets.length === 0 && invalid.length === 0 && hostDiscovery.invalid.length === 0) {
+          log.warn(
+            `Nothing to back up : no running container carries the ${chalk.yellow("dockup.backup.enabled=true")} label, and no host target is declared.`
+          );
 
           // Nothing to back up is not nothing to say: backups that used to run
           // and no longer show up are exactly what the staleness check catches.
@@ -188,7 +239,7 @@ export const BackupCommand = new Command()
           return;
         }
 
-        intro(`Backuping ${chalk.yellow(containers.length)} containers`);
+        intro(`Backuping ${chalk.yellow(targets.length)} targets`);
 
         // Containers that opted in but whose labels are unusable: they cannot be
         // backed up, but they must show up in the report rather than vanish.
@@ -203,12 +254,26 @@ export const BackupCommand = new Command()
           });
         }
 
-        for (const container of containers) {
+        // Host targets whose databases could not even be listed — the instance
+        // is unreachable, typically. Reported the same way : a red line rather
+        // than a silent gap in the report.
+        for (const { name, error } of hostDiscovery.invalid) {
+          log.error(`Skipping host target ${chalk.red(name)} : ${error._tag} ${error.message}`);
+          yield* record(report, {
+            type: "backup",
+            success: false,
+            backupName: name,
+            message: `host target unreachable — ${error.message}`,
+            code: error._tag,
+          });
+        }
+
+        for (const target of targets) {
           const task: TaskLog = taskLog({
-            title: `Backuping ${chalk.blue(container.backupName)} (${chalk.yellow(container.id)})`,
+            title: `Backuping ${describeTarget(target)}`,
             spacing: 0,
           });
-          yield* backupOne(report, container, task);
+          yield* backupOne(report, target, task);
         }
 
         // Retention cleanup — a failure here must not drop the backup report.
