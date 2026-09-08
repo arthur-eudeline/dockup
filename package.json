@@ -1,6 +1,7 @@
 {
   "name": "dockup",
   "version": "0.1.0",
+  "private": true,
   "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
@@ -12,7 +13,8 @@
   "scripts": {
     "check": "ultracite check",
     "fix": "ultracite fix",
-    "build": "bun build ./src/main.ts --compile --target=bun-linux-x64 --outfile dockup"
+    "build": "bun build ./src/main.ts --compile --target=bun-linux-x64 --outfile dockup",
+    "release": "bun scripts/tegami.mts"
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0",
@@ -26,6 +28,7 @@
     "@types/node": "^25.5.0",
     "oxfmt": "^0.41.0",
     "oxlint": "^1.56.0",
+    "tegami": "^1.5.0",
     "ultracite": "7.3.1"
   },
   "peerDependencies": {

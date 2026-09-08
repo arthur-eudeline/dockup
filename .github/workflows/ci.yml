@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  # Branch pushes only — a `v*` tag is release.yml's job, and it runs the same gate.
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    name: Lint & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      # `bun run check` (ultracite = oxlint + oxfmt) is the only gate: there is
+      # no test suite yet.
+      - run: bun run check
+
+      # Compiling is a type/bundle smoke test too — the runner is linux-x64, so
+      # the binary it produces can actually be executed.
+      - name: Build the linux-x64 binary
+        run: bun build ./src/main.ts --compile --target=bun-linux-x64 --outfile dockup
+
+      - name: Smoke test
+        run: |
+          ./dockup --version
+          ./dockup --help > /dev/null

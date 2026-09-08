@@ -4,29 +4,36 @@ import type { SelectOptions } from "@clack/prompts";
 import chalk from "chalk";
 import { Effect } from "effect";
 
-import type { ContainerBackupConfig } from "./docker";
 import type { AnyTaggedError } from "./effect";
 import { PromptCancelledError } from "./errors";
 import type { ResticSnapshotItemStructredOutput } from "./restic";
+import type { BackupTarget } from "./targets";
 
-export const promptSelect = <T>(args: SelectOptions<T>): Effect.Effect<T, PromptCancelledError> =>
-  Effect.gen(function* _promptSelect() {
-    const value = yield* Effect.promise(() => select<T>(args));
+/**
+ * Run any `@clack/prompts` prompt as an Effect: a user cancel (Ctrl-C / Esc)
+ * becomes a typed `PromptCancelledError` instead of a bare `process.exit`.
+ */
+export const prompt = <T>(run: () => Promise<T | symbol>): Effect.Effect<T, PromptCancelledError> =>
+  Effect.gen(function* _prompt() {
+    const value = yield* Effect.promise(run);
     if (isCancel(value)) return yield* Effect.fail(new PromptCancelledError({}));
     return value;
   });
 
-export const promptSelectContainer = (
-  containers: ContainerBackupConfig[]
-): Effect.Effect<ContainerBackupConfig, PromptCancelledError, never> =>
+export const promptSelect = <T>(args: SelectOptions<T>): Effect.Effect<T, PromptCancelledError> =>
+  prompt(() => select<T>(args));
+
+export const promptSelectTarget = (targets: BackupTarget[]): Effect.Effect<BackupTarget, PromptCancelledError, never> =>
   promptSelect({
     message: "Choose which backup to restore",
-    options: containers.map((container) => ({
-      label: container.backupName,
-      hint: container.type,
-      value: container,
+    options: targets.map((target) => ({
+      label: target.backupName,
+      // The source matters here: restoring a host target writes straight into a
+      // database nothing else is going to stop first.
+      hint: target.source === "host" ? `${target.type} (host)` : target.type,
+      value: target,
     })),
-  } as SelectOptions<ContainerBackupConfig>);
+  } as SelectOptions<BackupTarget>);
 
 export const promptSelectSnapshot = (snapshots: ResticSnapshotItemStructredOutput[]) =>
   promptSelect({
@@ -37,6 +44,12 @@ export const promptSelectSnapshot = (snapshots: ResticSnapshotItemStructredOutpu
     })),
   });
 
+/**
+ * Runs a probe under a spinner, renders its outcome, and never fails.
+ *
+ * Returns the value on success and `null` on failure, so a caller can keep using
+ * the result without assigning it from inside a callback.
+ */
 export const safeSpinner = <A, E extends AnyTaggedError, R>(
   effect: Effect.Effect<A, E, R>,
   args: {
@@ -44,19 +57,43 @@ export const safeSpinner = <A, E extends AnyTaggedError, R>(
     onSuccess: (result: A) => string;
     onError: (msg: E) => string;
   }
-): Effect.Effect<void, never, R> =>
+): Effect.Effect<A | null, never, R> =>
   Effect.gen(function* _safeSpinner() {
     const s = spinner();
     s.start(args.title);
-    yield* effect.pipe(
-      Effect.map((result) => {
-        s.stop(args.onSuccess(result));
-        return Effect.void;
-      }),
-      Effect.catchAll((error) => {
-        s.error(args.onError(error));
-        return Effect.void;
-      })
+
+    return yield* effect.pipe(
+      Effect.tap((result) => Effect.sync(() => s.stop(args.onSuccess(result)))),
+      Effect.catchAll((error) =>
+        Effect.sync(() => {
+          s.error(args.onError(error));
+          return null;
+        })
+      )
+    );
+  });
+
+/**
+ * Runs a step under a spinner, renders its outcome, and propagates its failure.
+ *
+ * Same shape as {@link taskSpinner} without the skip branch — so the success
+ * value keeps its type and the caller can go on using it.
+ */
+export const stepSpinner = <A, E extends AnyTaggedError, R>(
+  effect: Effect.Effect<A, E, R>,
+  args: {
+    title: string;
+    onSuccess: (result: A) => string;
+    onError: (error: E) => string;
+  }
+): Effect.Effect<A, E, R> =>
+  Effect.gen(function* _stepSpinner() {
+    const s = spinner();
+    s.start(args.title);
+
+    return yield* effect.pipe(
+      Effect.tapError((error) => Effect.sync(() => s.error(args.onError(error)))),
+      Effect.tap((result) => Effect.sync(() => s.stop(args.onSuccess(result))))
     );
   });
 

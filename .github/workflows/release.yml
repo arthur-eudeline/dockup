@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Lets a build be exercised without publishing anything: the binaries are
+  # uploaded as workflow artifacts and the release step is skipped.
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Build & publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run check
+
+      # `dockup --version` reports the version from package.json, so a tag that
+      # disagrees with the manifest would publish a binary lying about itself —
+      # and `dockup upgrade`, which compares the two, would loop forever.
+      - name: Check the tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          declared="$(bun --print 'require("./package.json").version')"
+          if [ "$tagged" != "$declared" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $declared"
+            exit 1
+          fi
+
+      # Bun cross-compiles every target from this one runner. Asset names are the
+      # contract `dockup upgrade` relies on: dockup-${process.platform}-${process.arch}.
+      # `-baseline` is the same linux-x64 build for CPUs without AVX2; it is never
+      # picked automatically, only downloaded by hand.
+      - name: Build every target
+        run: |
+          mkdir -p dist
+          for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64 linux-x64-baseline; do
+            echo "::group::$target"
+            bun build ./src/main.ts --compile --target="bun-$target" --outfile "dist/dockup-$target"
+            echo "::endgroup::"
+          done
+
+      - name: Smoke test the native binary
+        run: ./dist/dockup-linux-x64 --version
+
+      # `dockup upgrade` refuses to install an asset this file does not vouch for.
+      - name: Compute checksums
+        working-directory: dist
+        run: sha256sum dockup-* > SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dockup-binaries
+          path: dist/*
+
+      # `bun run release` (tegami) already wrote this version's section of
+      # CHANGELOG.md from the conventional commits — reuse it as the release notes
+      # rather than letting GitHub generate a second, different summary.
+      - name: Extract the release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          awk -v heading="## dockup@${GITHUB_REF_NAME#v}" '
+            $0 == heading { capture = 1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ -s release-notes.md ]; then
+            echo "NOTES_ARGS=--notes-file release-notes.md" >> "$GITHUB_ENV"
+          else
+            echo "::warning::no CHANGELOG.md section for $GITHUB_REF_NAME, falling back to generated notes"
+            echo "NOTES_ARGS=--generate-notes" >> "$GITHUB_ENV"
+          fi
+
+      - name: Publish the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" $NOTES_ARGS
