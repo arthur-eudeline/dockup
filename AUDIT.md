@@ -15,16 +15,16 @@
 | 2   | ✅ Corrigé  | `MARIADB_PASSWORD` lu comme un fichier → backup MariaDB cassé             | `src/lib/backup.ts:45`        |
 | 3   | ✅ Corrigé  | Un seul conteneur mal labellisé bloque toutes les sauvegardes             | `src/lib/docker.ts:116`       |
 | 4   | ✅ Corrigé  | Fuite de secrets dans les messages d'erreur → console et Discord          | `src/lib/utils.ts:50`         |
-| 5   | 🟠 Sécurité | `usermod` avec les arguments inversés                                     | `src/lib/config.ts:135`       |
+| 5   | ✅ Corrigé  | `usermod` avec les arguments inversés                                     | `src/lib/config.ts:135`       |
 | 6   | ✅ Corrigé  | Aucun échappement shell — injection depuis l'environnement des conteneurs | `src/lib/utils.ts:17,42`      |
-| 7   | 🟡 Bug      | `service init` ne peut pas fonctionner tel quel                           | `src/lib/service.ts:16,22,61` |
+| 7   | ✅ Corrigé  | `service init` ne peut pas fonctionner tel quel                           | `src/lib/service.ts:16,22,61` |
 | 8   | ✅ Corrigé  | `ensureWritePermission` ne peut jamais échouer                            | `src/lib/utils.ts:142`        |
 | 9   | ✅ Corrigé  | `$localhost` parasite dans les URI Postgres                               | `src/lib/backup.ts:166,192`   |
 | 10  | ✅ Corrigé  | `host.docker.internal` avec `--network host` ne résout pas sous Linux     | `src/lib/docker.ts:199`       |
 | 11  | 🟡 Bug      | Message Discord vide                                                      | `src/lib/discord.ts:35`       |
 | 12  | ✅ Corrigé  | `.env()` remplace tout l'environnement — plus de `PATH`, plus de `HOME`   | `src/lib/utils.ts:42`         |
 | 13  | 🟡 Bug      | `ensureRepoInitialized` confond « lent » et « non initialisé »            | `src/lib/restic.ts:288`       |
-| 14  | 🟡 Bug      | `jounalctl`                                                               | `src/lib/service.ts:74`       |
+| 14  | ✅ Corrigé  | `jounalctl`                                                               | `src/lib/service.ts:74`       |
 | 15  | 🟡 Bug      | `backup` ne vérifie ni les droits Docker ni l'état du dépôt               | `src/commands/backup.cmd.ts`  |
 | 16  | 🔵 Qualité  | Code mort, tags Effect, validations sans effet, divers                    | —                             |
 
@@ -161,7 +161,18 @@ d'erreur, et ne jamais exposer `e.message` brut vers Discord.
 tout utilisateur local — préférer `--env-file` sur un fichier temporaire en 600, ou `--env VAR`
 en héritant de l'environnement du process.
 
-### 5. `usermod` avec les arguments inversés — le compte de service gagne le groupe de l'invocateur
+### 5. ✅ `usermod` avec les arguments inversés — le compte de service gagne le groupe de l'invocateur
+
+> **Corrigé** : `sudo usermod -aG ${DOCKUP_SHELL_USER} ${currentUser}`, dans le bon ordre.
+>
+> Deux corrections liées dans la foulée :
+>
+> - **`$USER` a disparu de `config.ts`.** Il est vide sous systemd et vaut `root` sous `sudo`.
+>   Un helper `getCurrentUser()` (`id -un`) le remplace dans `writeConfig`,
+>   `addConfigPermission`, `removeConfigPermission` et `checkIfCurrentUserIsInDockupGroup`.
+> - **Les tests d'appartenance à un groupe ne sont plus des `String.includes`** (cf. §16) :
+>   `id -nG <user>` découpé sur les espaces et comparé nom entier. `docker-users` ne répond
+>   plus « oui » pour `docker`, ni `dockup-admins` pour `dockup`.
 
 **Emplacement :** `src/lib/config.ts:130-144`
 
@@ -204,7 +215,18 @@ simple `$` ou `!` dans un mot de passe suffit à casser un backup silencieusemen
 
 ## 🟡 Bugs fonctionnels confirmés
 
-### 7. `service init` ne peut pas fonctionner tel quel
+### 7. ✅ `service init` ne peut pas fonctionner tel quel
+
+> **Corrigé**, les trois points :
+>
+> - Les deux fichiers d'unité sont écrits via un helper `writeSystemFile` qui pipe le contenu
+>   dans `sudo tee` au lieu de `Bun.file().write()` — cohérent avec le reste du flux, et
+>   `service init` n'a plus besoin d'être lancé en root.
+> - `ExecStart` est absolu. `resolveExecStart()` prend `process.execPath` quand dockup tourne
+>   en binaire compilé, et retombe sur `/usr/local/bin/dockup` (le chemin d'installation
+>   d'`upload.sh`) quand il tourne depuis les sources, où `process.execPath` pointe sur `bun`.
+> - `systemctl daemon-reload` / `enable` / `start` sont passés en `sudo`, comme dans
+>   `service remove`.
 
 - `src/lib/service.ts:16` et `:39` écrivent dans `/etc/systemd/system/` via `Bun.file().write()`
   **sans `sudo`**, alors que toutes les autres étapes du même flux utilisent `sudo`. En
@@ -322,7 +344,9 @@ le process est tué, `exitCode !== 0`, et on affiche « le dépôt ne semble pas
 
 **Correctif :** distinguer le timeout du code de sortie et remonter `stderr`.
 
-### 14. `jounalctl`
+### 14. ✅ `jounalctl`
+
+> **Corrigé** : `journalctl`. La fonction reste inutilisée (cf. §16).
 
 **Emplacement :** `src/lib/service.ts:74`
 
