@@ -29,10 +29,7 @@ const formatReportLine = (l: ResticStructuredOutput): string => {
     return `🔴 failed to backup \`${l.backupName}\` : (\`${l.code}\`) ${l.message} (@everyone)`;
   }
 
-  const parts = [`🟢 backuped \`${l.backupName}\``];
-  if ("volumeName" in l) parts.push(l.volumeName);
-  parts.push(`: ${l.dataAdded} in ${l.totalDuration}`);
-  return parts.join(" ");
+  return `🟢 backuped \`${l.backupName}\` : ${l.dataAdded} in ${l.totalDuration}`;
 };
 
 /**

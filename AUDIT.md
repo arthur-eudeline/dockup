@@ -9,24 +9,24 @@
 
 ## Sommaire
 
-| #   | Sévérité    | Titre                                                                     | Emplacement                   |
-| --- | ----------- | ------------------------------------------------------------------------- | ----------------------------- |
-| 1   | ✅ Corrigé  | Aucun `pipefail` : un dump raté produit un snapshot vide « réussi »       | `src/lib/backup.ts:80,166`    |
-| 2   | ✅ Corrigé  | `MARIADB_PASSWORD` lu comme un fichier → backup MariaDB cassé             | `src/lib/backup.ts:45`        |
-| 3   | ✅ Corrigé  | Un seul conteneur mal labellisé bloque toutes les sauvegardes             | `src/lib/docker.ts:116`       |
-| 4   | ✅ Corrigé  | Fuite de secrets dans les messages d'erreur → console et Discord          | `src/lib/utils.ts:50`         |
-| 5   | ✅ Corrigé  | `usermod` avec les arguments inversés                                     | `src/lib/config.ts:135`       |
-| 6   | ✅ Corrigé  | Aucun échappement shell — injection depuis l'environnement des conteneurs | `src/lib/utils.ts:17,42`      |
-| 7   | ✅ Corrigé  | `service init` ne peut pas fonctionner tel quel                           | `src/lib/service.ts:16,22,61` |
-| 8   | ✅ Corrigé  | `ensureWritePermission` ne peut jamais échouer                            | `src/lib/utils.ts:142`        |
-| 9   | ✅ Corrigé  | `$localhost` parasite dans les URI Postgres                               | `src/lib/backup.ts:166,192`   |
-| 10  | ✅ Corrigé  | `host.docker.internal` avec `--network host` ne résout pas sous Linux     | `src/lib/docker.ts:199`       |
-| 11  | ✅ Corrigé  | Message Discord vide                                                      | `src/lib/discord.ts:35`       |
-| 12  | ✅ Corrigé  | `.env()` remplace tout l'environnement — plus de `PATH`, plus de `HOME`   | `src/lib/utils.ts:42`         |
-| 13  | ✅ Corrigé  | `ensureRepoInitialized` confond « lent » et « non initialisé »            | `src/lib/restic.ts:288`       |
-| 14  | ✅ Corrigé  | `jounalctl`                                                               | `src/lib/service.ts:74`       |
-| 15  | ✅ Corrigé  | `backup` ne vérifie ni les droits Docker ni l'état du dépôt               | `src/commands/backup.cmd.ts`  |
-| 16  | 🔵 Qualité  | Code mort, tags Effect, validations sans effet, divers                    | —                             |
+| #   | Sévérité   | Titre                                                                     | Emplacement                   |
+| --- | ---------- | ------------------------------------------------------------------------- | ----------------------------- |
+| 1   | ✅ Corrigé | Aucun `pipefail` : un dump raté produit un snapshot vide « réussi »       | `src/lib/backup.ts:80,166`    |
+| 2   | ✅ Corrigé | `MARIADB_PASSWORD` lu comme un fichier → backup MariaDB cassé             | `src/lib/backup.ts:45`        |
+| 3   | ✅ Corrigé | Un seul conteneur mal labellisé bloque toutes les sauvegardes             | `src/lib/docker.ts:116`       |
+| 4   | ✅ Corrigé | Fuite de secrets dans les messages d'erreur → console et Discord          | `src/lib/utils.ts:50`         |
+| 5   | ✅ Corrigé | `usermod` avec les arguments inversés                                     | `src/lib/config.ts:135`       |
+| 6   | ✅ Corrigé | Aucun échappement shell — injection depuis l'environnement des conteneurs | `src/lib/utils.ts:17,42`      |
+| 7   | ✅ Corrigé | `service init` ne peut pas fonctionner tel quel                           | `src/lib/service.ts:16,22,61` |
+| 8   | ✅ Corrigé | `ensureWritePermission` ne peut jamais échouer                            | `src/lib/utils.ts:142`        |
+| 9   | ✅ Corrigé | `$localhost` parasite dans les URI Postgres                               | `src/lib/backup.ts:166,192`   |
+| 10  | ✅ Corrigé | `host.docker.internal` avec `--network host` ne résout pas sous Linux     | `src/lib/docker.ts:199`       |
+| 11  | ✅ Corrigé | Message Discord vide                                                      | `src/lib/discord.ts:35`       |
+| 12  | ✅ Corrigé | `.env()` remplace tout l'environnement — plus de `PATH`, plus de `HOME`   | `src/lib/utils.ts:42`         |
+| 13  | ✅ Corrigé | `ensureRepoInitialized` confond « lent » et « non initialisé »            | `src/lib/restic.ts:288`       |
+| 14  | ✅ Corrigé | `jounalctl`                                                               | `src/lib/service.ts:74`       |
+| 15  | ✅ Corrigé | `backup` ne vérifie ni les droits Docker ni l'état du dépôt               | `src/commands/backup.cmd.ts`  |
+| 16  | 🟣 Partiel | Code mort, tags Effect, validations sans effet, divers                    | —                             |
 
 ---
 
@@ -41,7 +41,7 @@
 >
 > Deuxième ligne de défense pour le cas « le dump sort en 0 sans rien écrire » : le schéma de
 > sortie restic lit maintenant `total_bytes_processed`, et `parseResticBackupOutput(…, {
-> rejectEmpty: true })` — activé sur les deux dumps `--stdin` — échoue avec un
+rejectEmpty: true })` — activé sur les deux dumps `--stdin` — échoue avec un
 > `EmptyBackupError` si restic a traité 0 octet. Un snapshot vide ne peut plus être rapporté
 > comme un backup réussi.
 >
@@ -81,7 +81,7 @@ par le shell intégré de Bun.
 
 **Emplacement :** `src/lib/backup.ts:45`
 
-```ts
+```txt
 const password = yield* getContainerEnvVariable(containerId, vars, "MARIADB_PASSWORD", true);
 //                                                                                     ^^^^ file = true
 ```
@@ -107,7 +107,7 @@ faute de frappe.
 
 **Emplacement :** `src/lib/docker.ts:116-119`
 
-```ts
+```txt
 const containersInfos = yield* Effect.all(containerIds.map(getContainerBackupConfig), { concurrency: "unbounded" });
 ```
 
@@ -382,6 +382,40 @@ conteneur échoue individuellement et Discord reçoit N alertes au lieu d'un dia
 ---
 
 ## 🔵 Qualité de code
+
+> **Traité en partie.** Ce qui a été fait :
+>
+> - **Code mort supprimé** (~150 lignes) : toute la famille `matchError` / `matchErrorEffect` /
+>   `matchErrorPartial` / `MatchTypeErrorBuilder`, `LogTag`, `readServiceLogs`,
+>   `checkServiceStatus`, `ContainerBackupInfosParsingError`,
+>   `ResticSuccessfulVolumeBackupStructuredOutput` (et la branche `volumeName` de `discord.ts`
+>   qu'il faisait vivre), le champ `fileWriter`. `CLAUDE.md` ne décrit plus `matchError*` comme
+>   le mécanisme de gestion d'erreur du projet.
+> - **Tags Effect** : `LogTag` disparu, `ConfigTag` reste le seul `Context.GenericTag` — il n'y a
+>   plus deux services au type d'identifiant identique.
+> - **Validations sans effet** retirées : le `z.string().array().safeParse` sur un `string[]`
+>   (`docker.ts`) et l'`Effect.try` autour d'un `split` (`restic.ts`).
+> - **Capture par effet de bord** : `safeSpinner` renvoie `A | null` au lieu de forcer une
+>   variable mutable ; `check.cmd.ts` n'a plus ni `let config` ni `config as Config`.
+> - **`writeConfig`** est typé `Effect<void, ShellCommandFailureError>` et non plus
+>   `Effect<void, never>`.
+> - **Nom du conteneur restic jetable** : unique par opération et par run
+>   (`dockup-restic-<backup|restore>-<nom>-<pid>`), plus de collision avec un résidu.
+> - **Tests de groupe** par nom entier (`id -nG`) et non plus par `String.includes`.
+> - **Parsing de `docker exec … env`** : une valeur multi-lignes (certificat, clé PEM) ne
+>   décale plus toutes les variables suivantes — seule une ligne `NAME=` ouvre une variable.
+> - **`mariadb-dump -C`** supprimé.
+> - **`bun run check` passe** (formatage `.oxlintrc.json`, `.vscode/settings.json`, `AUDIT.md`).
+>
+> Ce qui reste ouvert :
+>
+> - **`docker ps --filter` ignore les conteneurs arrêtés** sans avertissement. Le corriger
+>   demande de décider ce que doit faire dockup d'un service labellisé mais éteint (l'ignorer ?
+>   le signaler ? le démarrer ?) — c'est un choix produit, pas un bug mécanique.
+> - **`backupVolumes` sauvegarde tous les mounts** sans filtre, `/run/secrets/*` compris. Filtrer
+>   changerait le contenu des snapshots existants ; à arbitrer.
+> - **Aucun test.** Les vérifications de cet audit ont été faites par scripts jetables, pas par
+>   une suite pérenne.
 
 ### Code mort (~140 lignes)
 

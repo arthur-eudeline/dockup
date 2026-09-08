@@ -21,24 +21,10 @@ const LABELS = {
  *
  * @returns Docker containers IDs list
  */
-export const listBackupEnabledContainerIds = (): Effect.Effect<string[], ParsingError | ShellCommandFailureError> =>
-  Effect.gen(function* _listBackupEnabledContainerIds() {
-    const result = yield* getShellOutput(
-      sh`docker ps --filter label=${LABELS.BACKUP_ENABLED}=true --format '{{.ID}}'`
-    ).pipe(Effect.map((r) => r.split("\n").filter((line) => line.length > 0)));
-
-    const { data, error } = z.string().array().safeParse(result);
-
-    if (error)
-      return yield* Effect.fail(
-        new ParsingError({
-          cause: error,
-          message: `Failed to parse docker containers IDs :\n${z.prettifyError(error)}\n`,
-        })
-      );
-
-    return yield* Effect.succeed(data);
-  });
+export const listBackupEnabledContainerIds = (): Effect.Effect<string[], ShellCommandFailureError> =>
+  getShellOutput(sh`docker ps --filter label=${LABELS.BACKUP_ENABLED}=true --format '{{.ID}}'`).pipe(
+    Effect.map((r) => r.split("\n").filter((line) => line.length > 0))
+  );
 
 const BASE_SCHEMA = z.object({
   backupName: z.string(),
@@ -223,14 +209,40 @@ export const RESTIC_ENV_VAR_NAMES = [
 export const formatResticConfigToEnvArgs = (): Effect.Effect<string> =>
   Effect.succeed(RESTIC_ENV_VAR_NAMES.map((name) => `-e ${name}`).join(" "));
 
+/** A line that starts a new variable, as opposed to continuing the previous one. */
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
 /**
- * Gets an environment variable from a Docker container
+ * Parses the output of `env`.
  *
- * @param containerId The container ID to retrieve the variable from
- * @param variable The variable name to extract
- * @param file If the value is stored inside a file (e.g. when using docker secrets)
+ * A multi-line value (a certificate, a PEM key) spans several output lines, and
+ * splitting on `\n` alone turned each continuation line into a bogus variable —
+ * shifting everything after it. Only a line that looks like `NAME=` starts a new
+ * variable; the rest is appended to the value being read.
+ */
+const parseEnvOutput = (output: string): Record<string, string> => {
+  const vars: Record<string, string> = {};
+  let currentKey: string | null = null;
+
+  for (const line of output.split("\n")) {
+    if (ENV_ASSIGNMENT.test(line)) {
+      const separator = line.indexOf("=");
+      currentKey = line.slice(0, separator);
+      vars[currentKey] = line.slice(separator + 1);
+    } else if (currentKey !== null) {
+      vars[currentKey] += `\n${line}`;
+    }
+  }
+
+  return vars;
+};
+
+/**
+ * Gets the environment variables of a Docker container
  *
- * @returns The variable value
+ * @param containerId The container ID to retrieve the variables from
+ *
+ * @returns The variables, keyed by name
  */
 export const getContainerEnvVariables = (
   containerId: string
@@ -238,13 +250,7 @@ export const getContainerEnvVariables = (
   Effect.gen(function* _getContainerEnvVariable() {
     const result = yield* getShellOutput(sh`docker exec ${containerId} env`);
     return yield* Effect.try({
-      try: () =>
-        Object.fromEntries(
-          result.split("\n").map((line) => {
-            const [key, ...value] = line.split("=");
-            return [key, value.join("=")];
-          })
-        ),
+      try: () => parseEnvOutput(result),
       catch: (e) =>
         new ParsingError({
           cause: e,

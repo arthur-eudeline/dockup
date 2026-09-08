@@ -44,6 +44,12 @@ export const promptSelectSnapshot = (snapshots: ResticSnapshotItemStructredOutpu
     })),
   });
 
+/**
+ * Runs a probe under a spinner, renders its outcome, and never fails.
+ *
+ * Returns the value on success and `null` on failure, so a caller can keep using
+ * the result without assigning it from inside a callback.
+ */
 export const safeSpinner = <A, E extends AnyTaggedError, R>(
   effect: Effect.Effect<A, E, R>,
   args: {
@@ -51,19 +57,19 @@ export const safeSpinner = <A, E extends AnyTaggedError, R>(
     onSuccess: (result: A) => string;
     onError: (msg: E) => string;
   }
-): Effect.Effect<void, never, R> =>
+): Effect.Effect<A | null, never, R> =>
   Effect.gen(function* _safeSpinner() {
     const s = spinner();
     s.start(args.title);
-    yield* effect.pipe(
-      Effect.map((result) => {
-        s.stop(args.onSuccess(result));
-        return Effect.void;
-      }),
-      Effect.catchAll((error) => {
-        s.error(args.onError(error));
-        return Effect.void;
-      })
+
+    return yield* effect.pipe(
+      Effect.tap((result) => Effect.sync(() => s.stop(args.onSuccess(result)))),
+      Effect.catchAll((error) =>
+        Effect.sync(() => {
+          s.error(args.onError(error));
+          return null;
+        })
+      )
     );
   });
 

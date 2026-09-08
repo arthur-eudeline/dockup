@@ -5,7 +5,6 @@ import { Effect } from "effect";
 
 import { DOCKUP_SHELL_USER } from "./config";
 import { ShellCommandFailureError } from "./errors";
-import { getShellOutput, sh } from "./utils";
 
 export const SERVICE_NAME = "dockup-auto-backup";
 export const SERVICE_PATH = `/etc/systemd/system/${SERVICE_NAME}.service`;
@@ -85,7 +84,3 @@ export const registerService = () =>
         cause: e,
       }),
   });
-
-export const checkServiceStatus = () => getShellOutput(sh`systemctl list-timers ${`${SERVICE_NAME}.timer`}`);
-
-export const readServiceLogs = () => getShellOutput(sh`journalctl -u ${SERVICE_NAME} -n 20 --no-pager`);

@@ -11,7 +11,6 @@ import {
   DOCKUP_SHELL_USER,
   readConfig,
 } from "../../lib/config";
-import type { Config } from "../../lib/config";
 import { ensureDockerPermissions } from "../../lib/docker";
 import { ConfigTag } from "../../lib/effect";
 import { safeSpinner } from "../../lib/prompts";
@@ -36,13 +35,9 @@ export const ConfigCheckCommand = new Command()
           onError: (e) => chalk.red(`config write permission : not granted\n${e.message}`),
         });
 
-        let config: Config | null = null;
-        yield* safeSpinner(readConfig, {
+        const config = yield* safeSpinner(readConfig, {
           title: "config content...",
-          onSuccess: (c) => {
-            config = c;
-            return chalk.green("config content : valid");
-          },
+          onSuccess: () => chalk.green("config content : valid"),
           onError: (e) => chalk.red(`config content : invalid\n${e.message}`),
         });
 
@@ -53,9 +48,9 @@ export const ConfigCheckCommand = new Command()
         });
 
         if (config) {
-          yield* safeSpinner(ensureRepoInitialized().pipe(Effect.provideService(ConfigTag, config as Config)), {
+          yield* safeSpinner(ensureRepoInitialized().pipe(Effect.provideService(ConfigTag, config)), {
             title: "checking restic repo...",
-            onSuccess: () => chalk.green("restic repo : configured at ") + chalk.yellow(config?.RESTIC_REPOSITORY),
+            onSuccess: () => chalk.green("restic repo : configured at ") + chalk.yellow(config.RESTIC_REPOSITORY),
             onError: (e) => chalk.red(`restic repo : error\n${e.message}`),
           });
         }

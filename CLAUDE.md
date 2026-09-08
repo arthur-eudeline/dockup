@@ -41,8 +41,7 @@ business logic returns `Effect`s, commands run them and render.
 
 **Everything is Effect-TS.** `lib` functions return `Effect.Effect<A, E, R>`. Errors are typed
 and modeled as `Data.TaggedError` subclasses in `src/lib/errors.ts` (tags are SCREAMING_SNAKE,
-e.g. `SHELL_COMMAND_FAILURE_ERROR`); handle them with `Effect.catchTag(s)` or the custom
-`matchError*` helpers in `src/lib/effect.ts`.
+e.g. `SHELL_COMMAND_FAILURE_ERROR`); handle them with `Effect.catchTag(s)`.
 
 **Config as an Effect dependency.** `src/lib/effect.ts` defines `ConfigTag` and `AppConfig`
 (the `Layer` that reads + decrypts the config). Effects that need credentials declare `ConfigTag`
@@ -68,16 +67,35 @@ schema-validated with Zod in `src/lib/config.ts` (`CONFIG_SCHEMA`: S3 creds, `RE
 `KEY` constant — encryption is obfuscation-at-rest, not a real secret boundary. File perms are
 `640 $USER:dockup` so the `dockup` system user can read it.
 
+**Running shell commands (`src/lib/utils.ts`).** `getShellOutput` / `streamShellOutput` are the
+only two ways to shell out, and both run `bash -o pipefail -c` — **not** Bun's built-in shell,
+which reports only the last command of a pipeline and so let a failed dump produce an empty
+"successful" snapshot. Build any command that interpolates a value with the `` sh`…` `` tagged
+template: it quotes every interpolated value, and everything dockup interpolates (container ids,
+DB users, volume paths) comes from `docker inspect` / `docker exec env`. A fragment the code
+itself assembled — a list of `-v`/`-e` flags — opts out with `raw()`; never a value from outside.
+
+**Secrets never reach the outside (`src/lib/redact.ts`).** Credentials are passed to child
+processes through the environment, never on a command line: `docker run -e NAME` / `docker exec
+-e NAME` with no `=` makes docker inherit the value from dockup's own env (so the caller must
+pass `env`), MariaDB uses `MYSQL_PWD` and postgres `PGPASSWORD`. On top of that, every secret is
+`registerSecret`-ed as it is resolved and `redact()`-ed out of error messages, streamed log lines
+and Discord payloads — a backup failure must never publish the S3 keys to a Discord channel.
+
 **Docker discovery.** `src/lib/docker.ts`. Labels: `dockup.backup.enabled=true`,
 `dockup.backup.name=<snapshot host/tag>`, `dockup.backup.type=mariadb|postgres|volumes`.
 Discovery shells out to `docker ps`/`docker inspect`; DB credentials are pulled from the target
 container's own env vars (`docker exec <id> env`), with `*_PASSWORD_FILE` (Docker secrets)
-resolved by `cat`-ing the file inside the container.
+resolved by `cat`-ing the file inside the container. `listBackupEnabledContainers` returns
+`{ containers, invalid }` — discovery is per-container best-effort, so one unreadable label set
+cannot cancel the whole run; callers must report `invalid` rather than drop it.
 
 **Backup/restore per type** (`src/lib/backup.ts`):
 
 - `mariadb` / `postgres` — `docker exec` a dump piped into `restic backup --stdin`; restore
   pipes `restic dump` back into the client. Uses `--host <backupName>` and `--tag <backupName>`.
+  Both dumps parse their output with `rejectEmpty`, so restic processing 0 byte fails with
+  `EmptyBackupError` instead of recording an empty snapshot as a success.
 - `volumes` — runs `restic/restic` in a throwaway `docker run --network host` with the
   container's mounts bind-mounted in. Restore stops the container, then restores inside an
   `Effect.ensuring` whose finalizer restarts it — so the container comes back up even if the
@@ -91,15 +109,20 @@ restic's `--json` output into typed structs.
 **Notifications** (`src/lib/discord.ts`). Backup runs aggregate `ResticStructuredOutput[]` into
 chunked (<2000 char) Discord webhook messages, with retry + 5s timeout; failures are swallowed.
 
-**systemd** (`src/lib/service.ts`). Writes unit + timer to `/etc/systemd/system/`, service name
-`dockup-auto-backup`, runs `dockup backup` as user/group `dockup`. `service init` also creates
-the `dockup` system user, adds it to the `docker` group, and adjusts config-file ownership.
+**systemd** (`src/lib/service.ts`). Writes unit + timer to `/etc/systemd/system/` through
+`sudo tee` (they are root-owned, and every other step of the flow already uses `sudo`), service
+name `dockup-auto-backup`, runs `dockup backup` as user/group `dockup`. `ExecStart` must be an
+absolute path — systemd rejects the unit otherwise — so `resolveExecStart()` uses
+`process.execPath` for the compiled binary and falls back to `/usr/local/bin/dockup`.
+`service init` also creates the `dockup` system user, adds it to the `docker` group, and adjusts
+config-file ownership.
 
 ## Runtime requirements
 
-The `docker` and `restic` binaries must be on `PATH` at runtime. Backup/restore and `service`
-commands assume a Linux host with systemd and `sudo`; `docker/` holds a local compose stack
-(RustFS as S3, plus labeled postgres/mariadb/wordpress) for exercising the tool.
+The `docker`, `restic` and `bash` binaries must be on `PATH` at runtime. Backup/restore and
+`service` commands assume a Linux host with systemd and `sudo`; `docker/` holds a local compose
+stack (RustFS as S3, plus labeled postgres/mariadb/wordpress) for exercising the tool. Note the
+`volumes` path uses `docker run --network host`, which does not work under Docker Desktop.
 
 ## Conventions
 
@@ -107,6 +130,8 @@ commands assume a Linux host with systemd and `sudo`; `docker/` holds a local co
   semicolons, ES5 trailing commas, sorted imports. Run `bun run fix` before committing.
 - Prefer adding a tagged error in `errors.ts` over throwing; thread it through the `Effect` `E`
   channel. Guard every `JSON.parse` / external-output parse with `Effect.try` + a `ParsingError`.
+- Never interpolate an external value into a command string by hand — use `` sh`…` ``. Never put
+  a credential on a command line — pass it through `env` and reference it by name.
 - Anything that leaves a resource in a bad state on failure (a stopped container, a half-written
   file) must restore it with `Effect.ensuring` / `Effect.acquireRelease`, not a trailing step.
 - Generator effects are named (`Effect.gen(function* _doThing() {...})`) — match that style.

@@ -107,15 +107,6 @@ export interface ResticSuccessfulBackupStructuredOutput {
   totalDuration: string;
 }
 
-export interface ResticSuccessfulVolumeBackupStructuredOutput {
-  success: true;
-  type: "backup";
-  volumeName: string;
-  backupName: string;
-  dataAdded: string;
-  totalDuration: string;
-}
-
 export interface ResticFailedBackupStructuredOutput {
   success: false;
   type: "backup";
@@ -135,7 +126,6 @@ export interface ResticCleanUpStructuredOutput {
  */
 export type ResticStructuredOutput =
   | ResticSuccessfulBackupStructuredOutput
-  | ResticSuccessfulVolumeBackupStructuredOutput
   | ResticFailedBackupStructuredOutput
   | ResticCleanUpStructuredOutput;
 
@@ -314,19 +304,28 @@ export const ensureRepoInitialized = (): Effect.Effect<
         const proc = spawn({
           cmd: ["restic", "snapshots"],
           env: { ...process.env, ...env },
-          timeout: REPO_PROBE_TIMEOUT_MS,
           stdout: "pipe",
           stderr: "pipe",
         });
 
-        await proc.exited;
+        // The timeout is tracked here rather than through `spawn({ timeout })` and
+        // `signalCode`: restic traps SIGTERM and exits 1 on its own, so a killed
+        // probe is indistinguishable from a genuine failure from the outside.
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          proc.kill();
+        }, REPO_PROBE_TIMEOUT_MS);
 
-        return {
-          exitCode: proc.exitCode,
-          // Set when the process was killed — by our own timeout, in practice.
-          signalCode: proc.signalCode,
-          stderr: redact((await new Response(proc.stderr).text()).trim()),
-        };
+        try {
+          await proc.exited;
+        } finally {
+          clearTimeout(timer);
+        }
+
+        const stderr = await new Response(proc.stderr).text();
+
+        return { timedOut, exitCode: proc.exitCode, stderr: redact(stderr.trim()) };
       },
       catch: (e) =>
         new ShellCommandFailureError({
@@ -335,14 +334,20 @@ export const ensureRepoInitialized = (): Effect.Effect<
         }),
     });
 
-    // A killed probe says nothing about the repository: reporting "not
+    // A probe we killed says nothing about the repository: reporting "not
     // initialized" here used to send people to `restic init` against a perfectly
     // healthy repo that was merely slow to answer.
-    if (probe.signalCode !== null) {
+    if (probe.timedOut) {
       return yield* Effect.fail(
         new ShellCommandFailureError({
-          cause: probe.signalCode,
-          message: `${chalk.yellow("restic snapshots")} did not answer within ${REPO_PROBE_TIMEOUT_MS / 1000}s and was killed. The S3 endpoint may be slow or unreachable — this says nothing about whether the repository is initialized.`,
+          cause: "TIMEOUT",
+          message: [
+            `${chalk.yellow("restic snapshots")} did not answer within ${REPO_PROBE_TIMEOUT_MS / 1000}s and was killed.`,
+            probe.stderr,
+            "The S3 endpoint may be slow or unreachable — this says nothing about whether the repository is initialized.",
+          ]
+            .filter(Boolean)
+            .join("\n"),
         })
       );
     }

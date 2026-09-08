@@ -1,5 +1,3 @@
-import { dirname } from "node:path";
-
 import { intro, log, outro, password, text } from "@clack/prompts";
 import { Command } from "commander";
 import { Effect } from "effect";
