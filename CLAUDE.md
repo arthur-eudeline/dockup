@@ -42,24 +42,25 @@ business logic returns `Effect`s, commands run them and render.
 **Everything is Effect-TS.** `lib` functions return `Effect.Effect<A, E, R>`. Errors are typed
 and modeled as `Data.TaggedError` subclasses in `src/lib/errors.ts` (tags are SCREAMING_SNAKE,
 e.g. `SHELL_COMMAND_FAILURE_ERROR`); handle them with `Effect.catchTag(s)` or the custom
-`matchError*` helpers in `src/lib/effect.ts`. Commands typically end the pipe with
-`Effect.ensureErrorType<never>()` to prove all errors are handled before `runPromise`.
+`matchError*` helpers in `src/lib/effect.ts`.
 
 **Config as an Effect dependency.** `src/lib/effect.ts` defines `ConfigTag` and `AppConfig`
-(the `Layer` that reads + decrypts the config), plus `effectRuntime` (a `ManagedRuntime` over
-that layer). Effects that need credentials declare `ConfigTag` in their `R` channel.
+(the `Layer` that reads + decrypts the config). Effects that need credentials declare `ConfigTag`
+in their `R` channel; `runCommand` provides `AppConfig`, so a missing/invalid config file is just
+another typed, rendered failure.
 
-**Command entry point (`src/lib/cli.ts`).** New/migrated commands wrap their whole body in one
-Effect and hand it to `runCommand` (needs config) or `runStandalone` (no config). The runner:
-renders every typed error uniformly via `@clack/prompts` (`_tag` + message + a remediation hint
-from `HINTS`), catches defects and interruptions so nothing escapes as an unhandled rejection,
-wires SIGINT/SIGTERM to Effect interruption so `Effect.ensuring` finalizers still run on Ctrl-C,
-and sets `process.exitCode` instead of calling `process.exit` (0 ok / 1 failure / 130 cancelled).
-So a command body must keep all failure in the typed error channel — no `process.exit`, no
-throwing, no `.catch`. `restore.cmd.ts` is the reference; the other commands still use the older
-`effectRuntime.runPromise` / bare `Effect.runPromise` + local `catch` style and are being migrated.
-Soft, expected outcomes get their own tagged errors (`PromptCancelledError`, `NoSnapshotsError`)
-rather than an early `process.exit`.
+**Command entry point (`src/lib/cli.ts`).** Every command wraps its whole body in one Effect and
+hands it to `runCommand` (needs config) or `runStandalone` (no config). The runner: renders every
+typed error uniformly via `@clack/prompts` (`_tag` + message + a remediation hint from `HINTS`),
+catches defects and interruptions so nothing escapes as an unhandled rejection, wires SIGINT/SIGTERM
+to Effect interruption so `Effect.ensuring` finalizers still run on Ctrl-C, and sets
+`process.exitCode` instead of calling `process.exit` (0 ok / 1 failure / 130 cancelled). So a
+command body keeps all failure in the typed error channel — no `process.exit`, no throwing, no
+`.catch`. Soft, expected outcomes get their own tagged errors (`PromptCancelledError`,
+`NoSnapshotsError`, `ServiceRemovalError`) rather than an early `process.exit`. `restore.cmd.ts` is
+the clearest reference. Multi-step commands choose a failure policy explicitly: `backup` and
+`service remove` are best-effort (every step runs, failures collected into the report / a counter);
+`service init` is abort-on-first (a half-installed service is worse than a clean failure).
 
 **Config file.** Encrypted JSON at `/etc/dockup.conf`, AES-256-GCM via `src/lib/crypto.ts`,
 schema-validated with Zod in `src/lib/config.ts` (`CONFIG_SCHEMA`: S3 creds, `RESTIC_REPOSITORY`
@@ -78,7 +79,9 @@ resolved by `cat`-ing the file inside the container.
 - `mariadb` / `postgres` — `docker exec` a dump piped into `restic backup --stdin`; restore
   pipes `restic dump` back into the client. Uses `--host <backupName>` and `--tag <backupName>`.
 - `volumes` — runs `restic/restic` in a throwaway `docker run --network host` with the
-  container's mounts bind-mounted in. Restore stops the container, restores, restarts it.
+  container's mounts bind-mounted in. Restore stops the container, then restores inside an
+  `Effect.ensuring` whose finalizer restarts it — so the container comes back up even if the
+  restore fails or is interrupted.
 
 **Restic wrapper** (`src/lib/restic.ts`). `configToResticEnv` maps config → restic env;
 `restic()` execs the binary and exits with its code; `resticCleanUp()` is the retention policy
