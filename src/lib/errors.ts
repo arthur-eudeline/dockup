@@ -86,3 +86,16 @@ export class NoSnapshotsError extends Data.TaggedError("NO_SNAPSHOTS_ERROR")<{
     return `No snapshot found for "${this.backupName}". Create one first with "dockup backup".`;
   }
 }
+
+/**
+ * Raised at the end of `service remove` when the uninstall ran best-effort but
+ * one or more steps failed. Every step is still attempted; this only reports
+ * that the cleanup was partial.
+ */
+export class ServiceRemovalError extends Data.TaggedError("SERVICE_REMOVAL_ERROR")<{
+  failed: number;
+}> {
+  override get message() {
+    return `${this.failed} uninstall step(s) failed — see the log above. Re-run "dockup service remove", or finish by hand.`;
+  }
+}
