@@ -25,7 +25,7 @@ export const listBackupEnabledContainerIds = (): Effect.Effect<string[], Parsing
   Effect.gen(function* _listBackupEnabledContainerIds() {
     const result = yield* getShellOutput(
       `docker ps --filter "label=${LABELS.BACKUP_ENABLED}=true" --format {{.ID}}`
-    ).pipe(Effect.map((r) => r.split("\n")));
+    ).pipe(Effect.map((r) => r.split("\n").filter((line) => line.length > 0)));
 
     const { data, error } = z.string().array().safeParse(result);
 

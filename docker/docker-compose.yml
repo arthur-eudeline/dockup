@@ -48,7 +48,7 @@ services:
 
   wordpress:
     image: wordpress:6.9-php8.2-apache
-    restart: always
+    restart: no
     labels:
       - "dockup.backup.enabled=true"
       - "dockup.backup.type=volumes"

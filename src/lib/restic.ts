@@ -223,28 +223,41 @@ export interface ResticSnapshotItemStructredOutput {
 
 export const parseResticSnapshotListOutput = (
   rawOutput: string
-): Effect.Effect<ResticSnapshotItemStructredOutput[], string, never> =>
+): Effect.Effect<ResticSnapshotItemStructredOutput[], ParsingError, never> =>
   Effect.gen(function* _parseResticSnapshotListOutput() {
-    const o = JSON.parse(rawOutput);
-    const { data, error } = z.array(RESTIC_BACKUP_LINE_SCHEMA).safeParse(o);
-    if (error) return yield* Effect.fail("");
+    const json = yield* Effect.try({
+      try: () => JSON.parse(rawOutput),
+      catch: (e) =>
+        new ParsingError({
+          cause: e,
+          message: `The restic snapshots output is not valid JSON.\n${rawOutput}`,
+        }),
+    });
 
-    return yield* Effect.succeed(
-      data
-        .map((line) => ({
-          date: line.time,
-          relativeDate: formatHumanDate(line.time),
-          id: line.short_id,
-          size: formatBytes(line.summary.total_bytes_processed),
-        }))
-        .toSorted((a, b) => b.date.getTime() - a.date.getTime())
-    );
+    const { data, error } = z.array(RESTIC_BACKUP_LINE_SCHEMA).safeParse(json);
+    if (error) {
+      return yield* Effect.fail(
+        new ParsingError({
+          cause: error,
+          message: `The restic snapshots output is not valid :\n${z.prettifyError(error)}`,
+        })
+      );
+    }
+
+    return data
+      .map((line) => ({
+        date: line.time,
+        relativeDate: formatHumanDate(line.time),
+        id: line.short_id,
+        size: formatBytes(line.summary.total_bytes_processed),
+      }))
+      .toSorted((a, b) => b.date.getTime() - a.date.getTime());
   });
 
 export const listSnapshots = (
   tag: string
-): Effect.Effect<ResticSnapshotItemStructredOutput[], ShellCommandFailureError | string, ConfigTag> =>
-  Effect.gen(function* _listSanpshots() {
+): Effect.Effect<ResticSnapshotItemStructredOutput[], ShellCommandFailureError | ParsingError, ConfigTag> =>
+  Effect.gen(function* _listSnapshots() {
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 

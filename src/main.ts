@@ -11,6 +11,13 @@ import { DOCKUP_ASCII } from "./lib/help-art";
 
 const VERSION = "0.0.1";
 
+// Last-resort safety net: a command runner (src/lib/cli.ts) is expected to
+// handle its own errors, but nothing should ever crash with a raw stack trace.
+process.on("unhandledRejection", (reason) => {
+  console.error(chalk.red("\nUnexpected error:"), reason instanceof Error ? (reason.stack ?? reason.message) : reason);
+  process.exitCode = 1;
+});
+
 const program = new Command()
   .name("dockup")
   .version(VERSION)
@@ -26,4 +33,9 @@ const program = new Command()
   .addHelpText("before", `Version : ${chalk.yellow(VERSION)}\n`)
   .addHelpText("afterAll", " ");
 
-program.parse(Bun.argv);
+try {
+  await program.parseAsync(Bun.argv);
+} catch (error) {
+  console.error(chalk.red(error instanceof Error ? error.message : String(error)));
+  process.exitCode = 1;
+}

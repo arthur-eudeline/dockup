@@ -61,3 +61,28 @@ export class PermissionError extends Data.TaggedError("PERMISSION_ERROR")<{
   cause: unknown;
   message: string;
 }> {}
+
+/**
+ * Raised when the user aborts an interactive prompt (Ctrl-C / Esc).
+ * Carried through the error channel instead of calling `process.exit`, so
+ * finalizers still run and the command runner can render it as a soft cancel.
+ */
+export class PromptCancelledError extends Data.TaggedError("PROMPT_CANCELLED_ERROR")<{
+  reason?: string;
+}> {
+  override get message() {
+    return this.reason ?? "Operation cancelled by the user.";
+  }
+}
+
+/**
+ * Raised by `restore` when the selected backup has no snapshot yet.
+ * Rendered as a warning (not a red error) by the command runner.
+ */
+export class NoSnapshotsError extends Data.TaggedError("NO_SNAPSHOTS_ERROR")<{
+  backupName: string;
+}> {
+  override get message() {
+    return `No snapshot found for "${this.backupName}". Create one first with "dockup backup".`;
+  }
+}

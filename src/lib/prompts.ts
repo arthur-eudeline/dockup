@@ -6,21 +6,19 @@ import { Effect } from "effect";
 
 import type { ContainerBackupConfig } from "./docker";
 import type { AnyTaggedError } from "./effect";
+import { PromptCancelledError } from "./errors";
 import type { ResticSnapshotItemStructredOutput } from "./restic";
 
-export const promptSelect = <T>(args: SelectOptions<T>) =>
-  Effect.promise(() =>
-    select<T>(args).then((v) => {
-      if (isCancel(v)) {
-        process.exit(0);
-      }
-      return v;
-    })
-  );
+export const promptSelect = <T>(args: SelectOptions<T>): Effect.Effect<T, PromptCancelledError> =>
+  Effect.gen(function* _promptSelect() {
+    const value = yield* Effect.promise(() => select<T>(args));
+    if (isCancel(value)) return yield* Effect.fail(new PromptCancelledError({}));
+    return value;
+  });
 
 export const promptSelectContainer = (
   containers: ContainerBackupConfig[]
-): Effect.Effect<ContainerBackupConfig, never, never> =>
+): Effect.Effect<ContainerBackupConfig, PromptCancelledError, never> =>
   promptSelect({
     message: "Choose which backup to restore",
     options: containers.map((container) => ({

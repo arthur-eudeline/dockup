@@ -4,50 +4,77 @@ import { Command } from "commander";
 import { Effect } from "effect";
 
 import { restoreMariaDB, restorePostgres, restoreVolumes } from "../lib/backup";
-import { listBackupEnabledContainers } from "../lib/docker";
-import { effectRuntime } from "../lib/effect";
+import { runCommand } from "../lib/cli";
+import { ensureDockerPermissions, listBackupEnabledContainers } from "../lib/docker";
+import { NoSnapshotsError } from "../lib/errors";
 import { promptSelectContainer, promptSelectSnapshot } from "../lib/prompts";
 import { listSnapshots } from "../lib/restic";
+import type { TaskLog } from "../lib/types";
 
 /**
- * Restores a snapshot
+ * Restores a restic snapshot into its container.
+ *
+ * The whole flow is a single Effect handed to `runCommand`: discovery, prompts
+ * and the restore itself all report through the typed error channel, so any
+ * failure is rendered uniformly and mapped to an exit code. Nothing here calls
+ * `process.exit`, and for volume restores the container is guaranteed to be
+ * restarted even on failure or Ctrl-C (see `restoreVolumes`).
  */
 export const RestoreCommand = new Command()
   .name("restore")
   .description("Restores a restic snapshot")
-  .action(async () => {
-    const program = Effect.gen(function* _program() {
-      intro("Restauring backup");
-      const containers = yield* listBackupEnabledContainers();
+  .action(() =>
+    runCommand(
+      Effect.gen(function* _restore() {
+        intro("Restoring backup");
 
-      const container = yield* promptSelectContainer(containers);
-      const snapshots = yield* listSnapshots(container.backupName);
-      if (snapshots.length === 0) {
-        log.warn(
-          `There is no snapshots available to restaure.\nTry creating one by running ${chalk.yellow("dockup backup")} command.`
+        yield* ensureDockerPermissions();
+
+        const containers = yield* listBackupEnabledContainers();
+        if (containers.length === 0) {
+          log.warn(
+            `No running container carries the ${chalk.yellow("dockup.backup.enabled=true")} label — nothing to restore.`
+          );
+          return;
+        }
+
+        const container = yield* promptSelectContainer(containers);
+
+        const snapshots = yield* listSnapshots(container.backupName);
+        if (snapshots.length === 0) {
+          return yield* Effect.fail(new NoSnapshotsError({ backupName: container.backupName }));
+        }
+
+        const snapshot = yield* promptSelectSnapshot(snapshots);
+
+        const logger: TaskLog = taskLog({
+          title: `Restoring ${chalk.blue(container.backupName)} from snapshot ${chalk.yellow(snapshot.id)} (${snapshot.relativeDate})`,
+          spacing: 0,
+        });
+
+        const restore = Effect.gen(function* _doRestore() {
+          switch (container.type) {
+            case "postgres": {
+              return yield* restorePostgres(container, snapshot.id, logger);
+            }
+            case "mariadb": {
+              return yield* restoreMariaDB(container, snapshot.id, logger);
+            }
+            case "volumes": {
+              return yield* restoreVolumes(container, snapshot.id, logger);
+            }
+            default: {
+              return yield* Effect.dieMessage("Unhandled backup type.");
+            }
+          }
+        });
+
+        yield* restore.pipe(
+          Effect.tapError(() => Effect.sync(() => logger.error("Restore failed."))),
+          Effect.tap(() => Effect.sync(() => logger.success("Snapshot restored.")))
         );
+
         outro("Done.");
-        process.exit(1);
-      }
-
-      const snapshot = yield* promptSelectSnapshot(snapshots);
-
-      const logger = taskLog({
-        title: `Restoring ${chalk.blue(container.backupName)} using snapshot ${chalk.yellow(snapshot.id)} (${snapshot.relativeDate})`,
-        spacing: 0,
-      });
-
-      if (container.type === "postgres") {
-        yield* restorePostgres(container, snapshot.id, logger);
-      } else if (container.type === "volumes") {
-        yield* restoreVolumes(container, snapshot.id, logger);
-      } else if (container.type === "mariadb") {
-        yield* restoreMariaDB(container, snapshot.id, logger);
-      }
-
-      logger.success(`Snapshot restored`);
-      outro(`Done.`);
-    });
-
-    await effectRuntime.runPromise(program);
-  });
+      })
+    )
+  );

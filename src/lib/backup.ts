@@ -242,7 +242,7 @@ export const restoreVolumes = (
   snapshotId: string,
   logger: TaskLog
 ): Effect.Effect<void, UndefinedVariableError | ShellCommandFailureError | ParsingError, ConfigTag> =>
-  Effect.gen(function* _backupVolumes() {
+  Effect.gen(function* _restoreVolumes() {
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 
@@ -254,27 +254,35 @@ export const restoreVolumes = (
       onSuccess: () => stoppingLogger.success(chalk.green(`Container ${chalk.yellow(container.id)} stopped.`)),
     });
 
-    const volumes = yield* getContainerVolumes(container.id);
-    const volumeArgs = yield* formatVolumeToArgs(volumes);
-    const envArgs = yield* formatResticConfigToEnvArgs(env);
+    const startLogger = logger.group(`Restarting container ${chalk.yellow(container.id)}`);
+    // The container was stopped above, so it must come back up no matter what
+    // happens next — a restore failure or a Ctrl-C included. `Effect.ensuring`
+    // runs this as an uninterruptible finalizer; errors here are swallowed so it
+    // can never mask the original failure.
+    const restart = streamShellOutput({
+      cmd: `docker start ${container.id}`,
+      env,
+      logger: startLogger,
+      onError: () => startLogger.error(`Failed to restart container ${chalk.yellow(container.id)}`),
+      onSuccess: () =>
+        startLogger.success(chalk.green(`Container ${chalk.yellow(container.id)} restarted successfully.`)),
+    }).pipe(Effect.catchAll(() => Effect.void));
 
-    yield* streamShellOutput({
-      logger,
-      cmd: `docker run --rm \
+    const restore = Effect.gen(function* _restore() {
+      const volumes = yield* getContainerVolumes(container.id);
+      const volumeArgs = yield* formatVolumeToArgs(volumes);
+      const envArgs = yield* formatResticConfigToEnvArgs(env);
+
+      yield* streamShellOutput({
+        logger,
+        cmd: `docker run --rm \
   --name dockup-restic-backup \
   --network host \
   ${volumeArgs} \
   ${envArgs} \
   restic/restic:latest restore ${snapshotId} --target / ${volumes.map((_v) => `--include ${_v.Destination}`).join(" ")} --json`,
+      });
     });
 
-    const startLogger = logger.group(`Restarting container ${chalk.yellow(container.id)}`);
-    yield* streamShellOutput({
-      cmd: `docker start ${container.id}`,
-      env,
-      logger: startLogger,
-      onError: () => startLogger.error(`Failed to restart container${chalk.yellow(container.id)}`),
-      onSuccess: () =>
-        startLogger.success(chalk.green(`Container ${chalk.yellow(container.id)} restarted successfully.`)),
-    });
+    yield* restore.pipe(Effect.ensuring(restart));
   });
