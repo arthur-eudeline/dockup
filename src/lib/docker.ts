@@ -2,7 +2,7 @@ import { $ } from "bun";
 import { Effect } from "effect";
 import { z } from "zod";
 
-import type { ShellCommandFailureError, ContainerBackupInfosParsingError } from "./errors";
+import type { ShellCommandFailureError } from "./errors";
 import { ParsingError, PermissionError, UndefinedVariableError } from "./errors";
 import type { ResticConf } from "./restic";
 import { getShellOutput, sh, shellQuote } from "./utils";
@@ -100,25 +100,43 @@ const getContainerBackupConfig = (
     return yield* Effect.succeed(data);
   });
 
+/** A container that opted in but whose labels could not be read or validated. */
+export interface UndiscoverableContainer {
+  id: string;
+  error: ShellCommandFailureError | ParsingError;
+}
+
+export interface ContainerDiscovery {
+  containers: ContainerBackupConfig[];
+  /** Opted-in containers dockup could not make sense of — reported, never silently dropped. */
+  invalid: UndiscoverableContainer[];
+}
+
 /**
- * List the docker containers backup configuration
+ * List the docker containers backup configuration.
  *
- * @returns The backup configuration list
+ * Per-container best-effort: a single container carrying `dockup.backup.enabled`
+ * with a missing `dockup.backup.name` or an unknown type used to fail the whole
+ * `Effect.all` and skip *every* backup that night. Invalid ones are now set aside
+ * and handed back to the caller to report.
+ *
+ * @returns The backup configuration list, plus the containers that could not be read
  */
 export const listBackupEnabledContainers = (): Effect.Effect<
-  ContainerBackupConfig[],
-  ShellCommandFailureError | ContainerBackupInfosParsingError | ParsingError,
+  ContainerDiscovery,
+  ShellCommandFailureError | ParsingError,
   never
 > =>
   Effect.gen(function* _listBackupEnabledContainers() {
     const containerIds = yield* listBackupEnabledContainerIds();
 
-    const containersInfos = yield* Effect.all(
-      containerIds.map((id) => getContainerBackupConfig(id)),
+    const [invalid, containers] = yield* Effect.partition(
+      containerIds,
+      (id) => getContainerBackupConfig(id).pipe(Effect.mapError((error) => ({ id, error }))),
       { concurrency: "unbounded" }
     );
 
-    return yield* Effect.succeed(containersInfos);
+    return { containers: [...containers], invalid: [...invalid] };
   });
 
 export const ensureDockerPermissions = () =>

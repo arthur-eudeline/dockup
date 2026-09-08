@@ -75,7 +75,7 @@ export const BackupCommand = new Command()
       Effect.gen(function* _backupCommand() {
         const report: Report = yield* Ref.make<ResticStructuredOutput[]>([]);
 
-        const containers = yield* listBackupEnabledContainers().pipe(
+        const { containers, invalid } = yield* listBackupEnabledContainers().pipe(
           Effect.catchAll((e) =>
             Effect.gen(function* _onListError() {
               yield* notifyDiscord(
@@ -86,12 +86,25 @@ export const BackupCommand = new Command()
           )
         );
 
-        if (containers.length === 0) {
+        if (containers.length === 0 && invalid.length === 0) {
           log.warn(`No running container carries the ${chalk.yellow("dockup.backup.enabled=true")} label.`);
           return;
         }
 
         intro(`Backuping ${chalk.yellow(containers.length)} containers`);
+
+        // Containers that opted in but whose labels are unusable: they cannot be
+        // backed up, but they must show up in the report rather than vanish.
+        for (const { id, error } of invalid) {
+          log.error(`Skipping ${chalk.red(id)} : ${error._tag} ${error.message}`);
+          yield* record(report, {
+            type: "backup",
+            success: false,
+            backupName: id,
+            message: `unreadable dockup labels — ${error.message}`,
+            code: error._tag,
+          });
+        }
 
         for (const container of containers) {
           const task: TaskLog = taskLog({

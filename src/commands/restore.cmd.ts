@@ -30,7 +30,13 @@ export const RestoreCommand = new Command()
 
         yield* ensureDockerPermissions();
 
-        const containers = yield* listBackupEnabledContainers();
+        const { containers, invalid } = yield* listBackupEnabledContainers();
+
+        // An unreadable container must not hide the ones that are restorable.
+        for (const { id, error } of invalid) {
+          log.warn(`Ignoring ${chalk.yellow(id)} — unreadable dockup labels : ${error._tag} ${error.message}`);
+        }
+
         if (containers.length === 0) {
           log.warn(
             `No running container carries the ${chalk.yellow("dockup.backup.enabled=true")} label — nothing to restore.`

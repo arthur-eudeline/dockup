@@ -10,7 +10,7 @@ import {
 } from "./docker";
 import type { ContainerBackupConfig } from "./docker";
 import { ConfigTag } from "./effect";
-import type { EmptyBackupError, ParsingError , ShellCommandFailureError} from "./errors";
+import type { EmptyBackupError, ParsingError, ShellCommandFailureError } from "./errors";
 import { UndefinedVariableError } from "./errors";
 import { registerSecret } from "./redact";
 import { configToResticEnv, parseResticBackupOutput } from "./restic";

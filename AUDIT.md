@@ -13,7 +13,7 @@
 | --- | ----------- | ------------------------------------------------------------------------- | ----------------------------- |
 | 1   | ✅ Corrigé  | Aucun `pipefail` : un dump raté produit un snapshot vide « réussi »       | `src/lib/backup.ts:80,166`    |
 | 2   | ✅ Corrigé  | `MARIADB_PASSWORD` lu comme un fichier → backup MariaDB cassé             | `src/lib/backup.ts:45`        |
-| 3   | 🔴 Critique | Un seul conteneur mal labellisé bloque toutes les sauvegardes             | `src/lib/docker.ts:116`       |
+| 3   | ✅ Corrigé  | Un seul conteneur mal labellisé bloque toutes les sauvegardes             | `src/lib/docker.ts:116`       |
 | 4   | ✅ Corrigé  | Fuite de secrets dans les messages d'erreur → console et Discord          | `src/lib/utils.ts:50`         |
 | 5   | 🟠 Sécurité | `usermod` avec les arguments inversés                                     | `src/lib/config.ts:135`       |
 | 6   | ✅ Corrigé  | Aucun échappement shell — injection depuis l'environnement des conteneurs | `src/lib/utils.ts:17,42`      |
@@ -94,7 +94,16 @@ lui-même. Ça échoue, le `Effect.catchAll(() => null)` ligne 49 avale l'erreur
 La version Postgres (`:131`) est correcte, elle n'a pas le `true` — l'asymétrie confirme la
 faute de frappe.
 
-### 3. Un seul conteneur mal labellisé bloque **toutes** les sauvegardes
+### 3. ✅ Un seul conteneur mal labellisé bloque **toutes** les sauvegardes
+
+> **Corrigé.** `listBackupEnabledContainers` utilise `Effect.partition` et renvoie désormais
+> `{ containers, invalid }` : les conteneurs illisibles sont mis de côté au lieu de faire
+> échouer la découverte entière. `backup` les journalise et les inscrit dans le rapport Discord
+> comme des échecs individuels (ils ne disparaissent donc pas silencieusement), et `restore` les
+> signale en warning avant de proposer la liste des conteneurs restaurables.
+>
+> Au passage, `ContainerBackupInfosParsingError` sort de la signature — il n'était jamais
+> construit (cf. §16).
 
 **Emplacement :** `src/lib/docker.ts:116-119`
 
