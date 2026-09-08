@@ -30,22 +30,28 @@ export const configToResticEnv = (config: Config): Effect.Effect<ResticConf> =>
   });
 
 /**
- * Executes restic command and fill out required environment variables
+ * Executes a restic command with the dockup credentials injected as env vars,
+ * streaming its stdio, and resolves to restic's own exit code. The caller
+ * mirrors that code onto the process (see `restic.cmd.ts`); a failure to even
+ * spawn restic surfaces as a `ShellCommandFailureError`.
  * @param args The restic command arguments
  */
-export const restic = (args: string[]): Effect.Effect<void, never, ConfigTag> =>
+export const restic = (args: string[]): Effect.Effect<number, ShellCommandFailureError, ConfigTag> =>
   Effect.gen(function* _restic() {
     const config = yield* ConfigTag;
-
     const env = yield* configToResticEnv(config);
-    yield* Effect.tryPromise({
-      try: () => $`restic ${args}`.env(env).then((v) => process.exit(v.exitCode)),
-      catch: (e) => {
-        if (e instanceof $.ShellError) {
-          return process.exit(e.exitCode);
-        }
-        return process.exit(1);
-      },
+
+    return yield* Effect.tryPromise({
+      try: () =>
+        $`restic ${args}`
+          .env(env)
+          .nothrow()
+          .then((v) => v.exitCode),
+      catch: (e) =>
+        new ShellCommandFailureError({
+          cause: e,
+          message: "Failed to run restic — is it installed and on your PATH ?",
+        }),
     });
   });
 
