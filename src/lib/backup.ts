@@ -39,14 +39,15 @@ const getMariadbEnvVariables = (containerId: string) =>
       Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () =>
         getContainerEnvVariable(containerId, vars, "MYSQL_PASSWORD_FILE", true)
       ),
-      Effect.catchAll(() => Effect.succeed(null))
+      // Only a *missing* variable falls back to the plain password: a failure to
+      // read the secret file must surface, not be mistaken for "no secret file".
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => Effect.succeed(null))
     );
 
-    const password = yield* getContainerEnvVariable(containerId, vars, "MARIADB_PASSWORD", true).pipe(
-      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () =>
-        getContainerEnvVariable(containerId, vars, "MYSQL_PASSWORD", true)
-      ),
-      Effect.catchAll(() => Effect.succeed(null))
+    // No `file` flag here: the variable holds the password itself, not a path to it.
+    const password = yield* getContainerEnvVariable(containerId, vars, "MARIADB_PASSWORD").pipe(
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => getContainerEnvVariable(containerId, vars, "MYSQL_PASSWORD")),
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => Effect.succeed(null))
     );
 
     if (!password && !passwordFile) {
@@ -125,11 +126,13 @@ const getPostgresEnvVariables = (containerId: string) =>
 
     const user = yield* getContainerEnvVariable(containerId, vars, "POSTGRES_USER");
     const database = yield* getContainerEnvVariable(containerId, vars, "POSTGRES_DB");
+    // Only a *missing* variable falls back to the plain password: a failure to
+    // read the secret file must surface, not be mistaken for "no secret file".
     const passwordFile = yield* getContainerEnvVariable(containerId, vars, "POSTGRES_PASSWORD_FILE", true).pipe(
-      Effect.catchAll(() => Effect.succeed(null))
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => Effect.succeed(null))
     );
     const password = yield* getContainerEnvVariable(containerId, vars, "POSTGRES_PASSWORD").pipe(
-      Effect.catchAll(() => Effect.succeed(null))
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => Effect.succeed(null))
     );
 
     if (!password && !passwordFile) {
