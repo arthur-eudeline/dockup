@@ -196,30 +196,32 @@ export const formatHumanDate = (date: Date) => {
   return `${fullDateStr} at ${timeStr}`;
 };
 
+/**
+ * Fails unless the directory holding `filePath` is writable.
+ *
+ * @param filePath The *file* to be written — its parent directory is the one tested
+ */
 export const ensureWritePermission = (
-  p: string
+  filePath: string
 ): Effect.Effect<void, FileSystemPermissionError | ShellCommandFailureError, never> =>
-  Effect.promise(async () => {
-    const dir = dirname(p);
-    let exitCode: number = -1;
+  Effect.gen(function* _ensureWritePermission() {
+    const dir = dirname(filePath);
 
-    try {
-      const result = await $`test -w ${dir}`.quiet();
-      exitCode = result.exitCode;
-    } catch (error) {
-      if (error instanceof $.ShellError) {
-        exitCode = error.exitCode;
-      } else {
-        return Effect.fail(
-          new ShellCommandFailureError({
-            cause: error,
-            message: `Failed to test write permission for path ${p}`,
-          })
-        );
-      }
+    // `nothrow`: a non-zero `test -w` is the answer, not an error to catch.
+    const exitCode = yield* Effect.tryPromise({
+      try: () =>
+        $`test -w ${dir}`
+          .quiet()
+          .nothrow()
+          .then((r) => r.exitCode),
+      catch: (e) =>
+        new ShellCommandFailureError({
+          cause: e,
+          message: `Failed to test write permission for path ${filePath}`,
+        }),
+    });
+
+    if (exitCode !== 0) {
+      return yield* Effect.fail(new FileSystemPermissionError({ path: filePath }));
     }
-
-    if (exitCode !== 0) return Effect.fail(new FileSystemPermissionError({ path: p }));
-
-    return Effect.void;
   });

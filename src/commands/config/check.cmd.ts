@@ -1,5 +1,3 @@
-import { dirname } from "node:path";
-
 import { intro, log, outro } from "@clack/prompts";
 import chalk from "chalk";
 import { Command } from "commander";
@@ -32,7 +30,7 @@ export const ConfigCheckCommand = new Command()
       Effect.gen(function* _check() {
         intro(chalk.blue("Checking dockup health :"));
 
-        yield* safeSpinner(ensureWritePermission(dirname(configPath)), {
+        yield* safeSpinner(ensureWritePermission(configPath), {
           title: "config write permission...",
           onSuccess: () => chalk.green("config write permission : granted"),
           onError: (e) => chalk.red(`config write permission : not granted\n${e.message}`),

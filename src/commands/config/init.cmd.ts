@@ -19,7 +19,7 @@ export const ConfigInitCommand = new Command()
         intro("Dockup configuration setup :");
 
         // Fail fast before asking anything if we can't write the config file.
-        yield* ensureWritePermission(dirname(configPath));
+        yield* ensureWritePermission(configPath);
 
         const AWS_ACCESS_KEY_ID = yield* prompt(() =>
           text({

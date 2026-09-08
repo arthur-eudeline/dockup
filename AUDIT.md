@@ -18,7 +18,7 @@
 | 5   | 🟠 Sécurité | `usermod` avec les arguments inversés                                     | `src/lib/config.ts:135`       |
 | 6   | ✅ Corrigé  | Aucun échappement shell — injection depuis l'environnement des conteneurs | `src/lib/utils.ts:17,42`      |
 | 7   | 🟡 Bug      | `service init` ne peut pas fonctionner tel quel                           | `src/lib/service.ts:16,22,61` |
-| 8   | 🟡 Bug      | `ensureWritePermission` ne peut jamais échouer                            | `src/lib/utils.ts:142`        |
+| 8   | ✅ Corrigé  | `ensureWritePermission` ne peut jamais échouer                            | `src/lib/utils.ts:142`        |
 | 9   | ✅ Corrigé  | `$localhost` parasite dans les URI Postgres                               | `src/lib/backup.ts:166,192`   |
 | 10  | ✅ Corrigé  | `host.docker.internal` avec `--network host` ne résout pas sous Linux     | `src/lib/docker.ts:199`       |
 | 11  | 🟡 Bug      | Message Discord vide                                                      | `src/lib/discord.ts:35`       |
@@ -218,7 +218,17 @@ simple `$` ou `!` dans un mot de passe suffit à casser un backup silencieusemen
 
 Ces trois points ensemble font que le chemin d'installation nominal ne peut pas aboutir.
 
-### 8. `ensureWritePermission` ne peut jamais échouer
+### 8. ✅ `ensureWritePermission` ne peut jamais échouer
+
+> **Corrigé** : réécrite en `Effect.gen` avec `yield* Effect.fail(…)`, et `test -w` passé en
+> `.nothrow()` (un code de sortie non nul est la réponse, pas une exception à rattraper).
+> Vérifié : `/etc/dockup.conf` → `Failure(FILE_SYSTEM_PERMISSION_ERROR)`, `/tmp/x.conf` →
+> `Success`.
+>
+> **Deuxième bug trouvé au passage :** la fonction fait déjà `dirname(p)`, mais les deux
+> appelants lui passaient `dirname(configPath)`. Le test portait donc sur `dirname("/etc")`,
+> soit `/` — pas `/etc`. Les appelants passent maintenant `configPath` directement, conformément
+> à la signature et au message de `FileSystemPermissionError`.
 
 **Emplacement :** `src/lib/utils.ts:142-168`
 
