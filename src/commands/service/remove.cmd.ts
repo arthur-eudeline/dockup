@@ -10,6 +10,7 @@ import type { AnyTaggedError } from "../../lib/effect";
 import { ServiceRemovalError, ShellCommandFailureError } from "../../lib/errors";
 import { taskSpinner } from "../../lib/prompts";
 import { SERVICE_NAME, SERVICE_PATH, TIMER_PATH } from "../../lib/service";
+import { deleteStateDir, STATE_DIR } from "../../lib/state";
 import { getShellOutput } from "../../lib/utils";
 
 const deleteFile = (path: string) =>
@@ -88,6 +89,16 @@ export const ServiceRemoveCommand = new Command()
               chalk.red(
                 `Failed to remove read permission to ${chalk.yellow(DOCKUP_SHELL_USER)} on config file ${chalk.yellow(configPath)}`
               ),
+          })
+        );
+
+        // Backup health + undelivered notifications: no snapshot lives here, and
+        // leaving it behind would keep a directory owned by a user we delete next.
+        yield* step(
+          taskSpinner(deleteStateDir(), {
+            title: `Deleting the state directory ${chalk.yellow(STATE_DIR)}`,
+            onSuccess: () => chalk.green(`state directory ${chalk.yellow(STATE_DIR)} deleted`),
+            onError: () => chalk.red(`failed to delete the state directory ${chalk.yellow(STATE_DIR)}`),
           })
         );
 

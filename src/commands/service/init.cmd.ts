@@ -24,6 +24,7 @@ import {
   writeServiceFile,
   writeTimerFile,
 } from "../../lib/service";
+import { createStateDir, STATE_DIR } from "../../lib/state";
 
 export const ServiceInitCommand = new Command()
   .name("init")
@@ -87,6 +88,14 @@ export const ServiceInitCommand = new Command()
             chalk.red(
               `failed to grant read permission to ${chalk.yellow(DOCKUP_SHELL_USER)} user on config file at ${chalk.yellow(configPath)}`
             ),
+        });
+
+        // State directory — without it a run cannot remember that last night
+        // failed too, and the failure-streak alerting is silently disabled.
+        yield* taskSpinner(createStateDir(), {
+          title: `creating the state directory at ${chalk.yellow(STATE_DIR)}`,
+          onSuccess: () => chalk.green(`state directory created at ${chalk.yellow(STATE_DIR)}`),
+          onError: () => chalk.red(`failed to create the state directory at ${chalk.yellow(STATE_DIR)}`),
         });
 
         // Write service file

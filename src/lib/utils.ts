@@ -158,6 +158,23 @@ export const formatDuration = (seconds: number): string => {
   return parts.join(" ");
 };
 
+const DAY_MS = 86_400_000;
+
+/**
+ * Reads a date back from the state file. Anything unparsable — a hand-edited
+ * file, a value written by an older version — reads as "unknown" rather than an
+ * `Invalid Date` that would silently poison every comparison downstream.
+ */
+export const parseDate = (value: string | null | undefined): Date | null => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+/** Whole days elapsed from `from` to `to`, floored, never negative. */
+export const daysBetween = (from: Date, to: Date): number =>
+  Math.max(0, Math.floor((to.getTime() - from.getTime()) / DAY_MS));
+
 /**
  * Formate une date pour un affichage humain dans le CLI
  */

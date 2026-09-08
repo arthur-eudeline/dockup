@@ -17,6 +17,7 @@ const HINTS: Record<string, string> = {
   FILE_SYSTEM_PERMISSION_ERROR: `Re-run with enough privileges to write the config file.`,
   SHELL_COMMAND_FAILURE_ERROR: `Check that ${chalk.yellow("docker")}, ${chalk.yellow("restic")} and ${chalk.yellow("bash")} are installed and on your PATH.`,
   EMPTY_BACKUP_ERROR: `The dump command wrote nothing — check the container is up and its DB credentials are the ones dockup reads from its environment.`,
+  STATE_PERSISTENCE_ERROR: `Run ${chalk.yellow("dockup service init")} to create the state directory, or delete the file if it is corrupt.`,
 };
 
 const isTagged = (u: unknown): u is AnyTaggedError =>

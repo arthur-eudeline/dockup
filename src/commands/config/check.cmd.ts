@@ -15,6 +15,7 @@ import { ensureDockerPermissions } from "../../lib/docker";
 import { ConfigTag } from "../../lib/effect";
 import { safeSpinner } from "../../lib/prompts";
 import { ensureRepoInitialized } from "../../lib/restic";
+import { STATE_DIR, STATE_PATH } from "../../lib/state";
 import { ensureWritePermission } from "../../lib/utils";
 
 export const ConfigCheckCommand = new Command()
@@ -33,6 +34,17 @@ export const ConfigCheckCommand = new Command()
           title: "config write permission...",
           onSuccess: () => chalk.green("config write permission : granted"),
           onError: (e) => chalk.red(`config write permission : not granted\n${e.message}`),
+        });
+
+        // Without a writable state directory, dockup forgets last night: backups
+        // keep working, the "3 days without a successful backup" alert does not.
+        yield* safeSpinner(ensureWritePermission(STATE_PATH), {
+          title: "backup health state...",
+          onSuccess: () => chalk.green(`backup health state : writable at ${chalk.yellow(STATE_PATH)}`),
+          onError: (e) =>
+            chalk.red(
+              `backup health state : not writable — failure-streak alerts are disabled\n${e.message}\nRun ${chalk.yellow("dockup service init")} to create ${chalk.yellow(STATE_DIR)}.`
+            ),
         });
 
         const config = yield* safeSpinner(readConfig, {

@@ -48,9 +48,34 @@ export class FileSystemPermissionError extends Data.TaggedError("FILE_SYSTEM_PER
   path: string;
 }> {
   override get message() {
-    return `You don't have the write permission to create the config file at ${this.path}`;
+    return `You don't have the write permission to create ${this.path}`;
   }
 }
+
+/**
+ * Raised when the cross-run state (backup health streaks + undelivered Discord
+ * messages) cannot be read or written. Never fatal: a run that cannot persist
+ * its state still backs everything up, it only loses the failure-streak
+ * alerting — so callers report it and carry on rather than aborting.
+ */
+export class StatePersistenceError extends Data.TaggedError("STATE_PERSISTENCE_ERROR")<{
+  cause: unknown;
+  message: string;
+}> {}
+
+/**
+ * Raised when a Discord webhook delivery fails.
+ *
+ * `retryable` separates "Discord is down / rate-limiting us" — worth another
+ * attempt, and worth keeping the message for the next run — from "Discord
+ * refused this message" (a 4xx), which would be refused just as firmly forever.
+ */
+export class DiscordNotificationError extends Data.TaggedError("DISCORD_NOTIFICATION_ERROR")<{
+  message: string;
+  retryable: boolean;
+  /** Delay Discord itself asked us to wait (429 `Retry-After`), in milliseconds. */
+  retryAfterMs?: number;
+}> {}
 
 export class ResticRepoNotInitializedError extends Data.TaggedError("RESTIC_REPO_NOT_INITIALIZED_ERROR")<{
   cause: unknown;

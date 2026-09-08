@@ -26,7 +26,8 @@ Deploy: `upload.sh` rsyncs the compiled `./dockup` binary to the server and move
 ### CLI surface (see `src/main.ts`)
 
 - `dockup backup` — scan running containers, back up each labeled one, run retention
-  cleanup, post a Discord report.
+  cleanup, post a Discord report, and escalate any backup that has gone 3 days without a
+  successful run.
 - `dockup restore` — interactive: pick a container, pick a snapshot, restore it.
 - `dockup restic [args...]` — passthrough to the `restic` binary with repo/credentials env injected.
 - `dockup config init` / `dockup config check` (alias `doctor`) — manage/validate the config file.
@@ -107,21 +108,44 @@ cannot cancel the whole run; callers must report `invalid` rather than drop it.
 restic's `--json` output into typed structs.
 
 **Notifications** (`src/lib/discord.ts`). Backup runs aggregate `ResticStructuredOutput[]` into
-chunked (<2000 char) Discord webhook messages, with retry + 5s timeout; failures are swallowed.
+chunked (<2000 char) Discord webhook messages. Delivery is deliberate about failure:
+`fetch` resolving is not success, so `classify()` reads the status — 429 (honouring `Retry-After`),
+5xx and 408 are retryable (5 attempts, jittered exponential backoff, 10s per attempt), every other
+4xx is a permanent rejection that is dropped rather than retried forever. `deliverDiscordMessages`
+never fails and never logs (lib is UI-free): it returns `{ delivered, retryable, dropped }` and the
+command decides. Once Discord proves unreachable the remaining messages are spooled unsent instead
+of each burning 5 attempts. Messages in `retryable` are persisted and re-sent by the next run.
+
+**Cross-run state and staleness alerting** (`src/lib/state.ts` + `src/lib/health.ts`). A run only
+knows about itself, so three failed nights in a row look like three unrelated red lines and a
+container that quietly disappeared produces no line at all. `/var/lib/dockup/state.json` (schema-
+validated, written through a temp file + `rename` so it is atomic and replaceable by any member of
+the `dockup` group) therefore carries per-backup health — last success, failure streak, last
+alert — plus the undelivered Discord messages. `health.ts` is pure: `applyRun` folds a run's
+outcomes into the state and returns the escalations, and the rule is one line — **no successful
+backup for `ALERT_AFTER_DAYS` (3) days**, whatever the cause: it failed, the run aborted in
+preflight (`preflightOutcomes` marks every known backup failed, so aborted nights count too), or
+the container is simply gone. Repeats are throttled to 12h, and a backup that recovers gets a
+closing message. State is best-effort: a run that cannot read or write it still backs everything
+up, says so locally _and_ in the Discord report, and loses only the streak alerting — so
+`config check` probes it and `service init` creates the directory.
 
 **systemd** (`src/lib/service.ts`). Writes unit + timer to `/etc/systemd/system/` through
 `sudo tee` (they are root-owned, and every other step of the flow already uses `sudo`), service
 name `dockup-auto-backup`, runs `dockup backup` as user/group `dockup`. `ExecStart` must be an
 absolute path — systemd rejects the unit otherwise — so `resolveExecStart()` uses
 `process.execPath` for the compiled binary and falls back to `/usr/local/bin/dockup`.
-`service init` also creates the `dockup` system user, adds it to the `docker` group, and adjusts
-config-file ownership.
+`service init` also creates the `dockup` system user, adds it to the `docker` group, adjusts
+config-file ownership, and creates `/var/lib/dockup` (`770 dockup:dockup`); `service remove`
+deletes that directory.
 
 ## Runtime requirements
 
-The `docker`, `restic` and `bash` binaries must be on `PATH` at runtime. Backup/restore and
-`service` commands assume a Linux host with systemd and `sudo`; `docker/` holds a local compose
-stack (RustFS as S3, plus labeled postgres/mariadb/wordpress) for exercising the tool. Note the
+The `docker`, `restic` and `bash` binaries must be on `PATH` at runtime, and `/var/lib/dockup`
+must be writable by whoever runs `backup` (alerting degrades without it, backups do not).
+Backup/restore and `service` commands assume a Linux host with systemd and `sudo`; `docker/` holds
+a local compose stack (RustFS as S3, plus labeled postgres/mariadb/wordpress) for exercising the
+tool. Note the
 `volumes` path uses `docker run --network host`, which does not work under Docker Desktop.
 
 ## Conventions
