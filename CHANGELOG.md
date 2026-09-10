@@ -1,3 +1,9 @@
+## dockup@0.3.0
+
+### Features
+
+- Init non-interactive (5801722)
+
 ## dockup@0.2.0
 
 ### Features
