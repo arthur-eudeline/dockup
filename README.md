@@ -51,6 +51,9 @@ does not work under Docker Desktop. Restoring/backing up a database running dire
    dockup config init
    ```
 
+   Provisioning with Ansible or cloud-init? `config init` also runs unattended — every value can come
+   from a flag, an env var or a JSON file. See "Unattended install" under "Configuration & security" below.
+
 2. **Label the containers you want backed up** — see "Labels" below.
 
 3. **Run a backup once, by hand, to make sure everything is wired correctly:**
@@ -218,6 +221,59 @@ dockup restic forget --tag my-app-db --prune
 - `dockup config check` (alias `doctor`) is the one command to run whenever something looks wrong: it
   probes file permissions, the config's validity, docker access, the Restic repository, and every
   declared host target, and reports each independently.
+
+### Unattended install (Ansible, cloud-init, …)
+
+`dockup config init` needs no terminal. Whenever there is no TTY (or you pass `-y` /
+`--non-interactive`), it never prompts: it takes each value from a flag, an environment variable, or
+a `--json` document, validates the result, and fails with the exact list of what is missing rather
+than blocking on a question.
+
+Every scalar key has three interchangeable sources, in order of precedence:
+
+| Config key              | Flag                      | Environment variable           |
+| ----------------------- | ------------------------- | ------------------------------ |
+| `AWS_ACCESS_KEY_ID`     | `--aws-access-key-id`     | `DOCKUP_AWS_ACCESS_KEY_ID`     |
+| `AWS_SECRET_ACCESS_KEY` | `--aws-secret-access-key` | `DOCKUP_AWS_SECRET_ACCESS_KEY` |
+| `RESTIC_REPOSITORY`     | `--restic-repository`     | `DOCKUP_RESTIC_REPOSITORY`     |
+| `RESTIC_PASSWORD`       | `--restic-password`       | `DOCKUP_RESTIC_PASSWORD`       |
+| `DISCORD_WEBHOOK`       | `--discord-webhook`       | `DOCKUP_DISCORD_WEBHOOK`       |
+
+`--json <path>` reads a JSON object with any of those keys (plus `hosts[]` for databases running
+outside docker — the one thing the flags don't cover). Flags and env vars override the keys it
+carries, so a committed `--json` file can hold the non-secret settings while the passwords come from
+the environment. Pass `-` to read the document from stdin.
+
+`config init` will not overwrite an existing `/etc/dockup.conf` unattended: without `--force` it logs
+a notice and exits `0`, so a play that re-runs the task stays green. Pass `--force` to rotate
+credentials.
+
+```yaml
+# Ansible: secrets from the environment (kept out of the process list and, with no_log, out of the logs)
+- name: Configure dockup
+  ansible.builtin.command:
+    argv:
+      - dockup
+      - config
+      - init
+      - --non-interactive
+      - --restic-repository=s3:https://s3.example.com/backups
+      - --discord-webhook={{ dockup_discord_webhook }}
+  environment:
+    DOCKUP_AWS_ACCESS_KEY_ID: "{{ dockup_s3_access_key_id }}"
+    DOCKUP_AWS_SECRET_ACCESS_KEY: "{{ dockup_s3_secret_access_key }}"
+    DOCKUP_RESTIC_PASSWORD: "{{ dockup_restic_password }}"
+  args:
+    creates: /etc/dockup.conf
+  no_log: true
+```
+
+Or hand it the whole document at once:
+
+```bash
+dockup config init --non-interactive --json /etc/dockup.conf.json   # a file rendered by your provisioner
+cat config.json | dockup config init -y --json -                     # or piped in
+```
 
 ## ⬆️ Update
 

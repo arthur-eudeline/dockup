@@ -36,6 +36,10 @@ pushed. Versions and `CHANGELOG.md` come from the conventional commits (see **Re
 - `dockup restore` — interactive: pick a target, pick a snapshot, restore it.
 - `dockup restic [args...]` — passthrough to the `restic` binary with repo/credentials env injected.
 - `dockup config init` / `dockup config check` (alias `doctor`) — manage/validate the config file.
+  `config init` prompts interactively, or runs unattended (no TTY, or `-y`/`--non-interactive`) taking
+  each value from a `--<key>` flag, a `DOCKUP_<KEY>` env var, or a `--json <path|->` document
+  (`hosts[]` included); `--force` to overwrite an existing config, otherwise an existing file is a
+  no-op exit 0.
 - `dockup config target add` / `list` (alias `ls`) / `remove` (alias `rm`); the group is also aliased
   `targets`. Declares the postgres databases running on the host, outside docker.
 - `dockup service init` (alias `setup`) / `test` / `remove` (alias `uninstall`); the `service`

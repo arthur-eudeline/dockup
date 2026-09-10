@@ -13,6 +13,7 @@ import { RELEASES_URL } from "./upgrade";
 const HINTS: Record<string, string> = {
   CONFIGURATION_RETRIEVAL_ERROR: `Run ${chalk.yellow("dockup config init")} to (re)create the config file.`,
   INVALID_CONFIGURATION_ERROR: `Run ${chalk.yellow("dockup config init")} to rewrite a valid config file.`,
+  NON_INTERACTIVE_CONFIG_ERROR: `Supply each value as a ${chalk.yellow("--flag")}, a ${chalk.yellow("DOCKUP_*")} env var, or a key in ${chalk.yellow("--json")} — or run ${chalk.yellow("dockup config init")} in a terminal for the prompts.`,
   RESTIC_REPO_NOT_INITIALIZED_ERROR: `Run ${chalk.yellow("dockup restic init")} to initialize the S3 repository.`,
   PERMISSION_ERROR: `Add your user to the ${chalk.yellow("docker")} group and re-log, or run ${chalk.yellow("dockup service init")}.`,
   FILE_SYSTEM_PERMISSION_ERROR: `Re-run with enough privileges to write the config file.`,

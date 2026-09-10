@@ -148,6 +148,23 @@ export class PromptCancelledError extends Data.TaggedError("PROMPT_CANCELLED_ERR
 }
 
 /**
+ * Raised by `config init` when it runs without a terminal (or with
+ * `--non-interactive`) and one or more required values were supplied by
+ * neither a flag, an environment variable, nor the `--json` document.
+ * Exists so an unattended install (Ansible, cloud-init, …) fails loudly with
+ * the exact list of what is missing instead of blocking on a prompt.
+ */
+export class NonInteractiveConfigError extends Data.TaggedError("NON_INTERACTIVE_CONFIG_ERROR")<{
+  missing: string[];
+}> {
+  override get message() {
+    return `Cannot assemble the configuration without prompting — no value provided for:\n${this.missing
+      .map((entry) => `  • ${entry}`)
+      .join("\n")}`;
+  }
+}
+
+/**
  * Raised by `restore` when the selected backup has no snapshot yet.
  * Rendered as a warning (not a red error) by the command runner.
  */
