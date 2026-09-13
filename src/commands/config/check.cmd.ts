@@ -3,7 +3,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import { Effect } from "effect";
 
-import { checkHostTarget } from "../../lib/backup";
+import { checkHostTarget, resolveContainerTargets } from "../../lib/backup";
 import { runStandalone } from "../../lib/cli";
 import {
   checkIfUserExists,
@@ -91,6 +91,29 @@ export const ConfigCheckCommand = new Command()
 
           for (const { id, error } of containerDiscovery.invalid) {
             log.warn(`Container ${chalk.yellow(id)} carries the label but its config is invalid : ${error.message}`);
+          }
+
+          // `allDatabases` containers name no database up front — probe them the
+          // way `backup` will, so a typo or an unreachable database only ever
+          // shows up here rather than in the first nightly report.
+          const allDatabasesContainers = containerDiscovery.containers.filter(
+            (c) => c.type === "postgres" && c.allDatabases
+          );
+          if (allDatabasesContainers.length > 0) {
+            const resolution = yield* safeSpinner(resolveContainerTargets(allDatabasesContainers), {
+              title: "discovering databases of all-databases containers...",
+              onSuccess: (r) => chalk.green(`all-databases containers : ${r.containers.length} database(s) found`),
+              onError: () => chalk.red("all-databases containers : could not list their databases"),
+            });
+
+            if (resolution) {
+              if (resolution.containers.length > 0) {
+                log.message(resolution.containers.map(describeContainer).join("\n"));
+              }
+              for (const { id, error } of resolution.invalid) {
+                log.warn(`Container ${chalk.yellow(id)} : could not list its databases : ${error.message}`);
+              }
+            }
           }
         }
 

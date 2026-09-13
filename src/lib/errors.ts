@@ -44,7 +44,7 @@ export class ConfigurationRetrievalError extends Data.TaggedError("CONFIGURATION
   }
 }
 
-export class FileSystemPermissionError extends Data.TaggedError@("FILE_SYSTEM_PERMISSION_ERROR")<{
+export class FileSystemPermissionError extends Data.TaggedError("FILE_SYSTEM_PERMISSION_ERROR")<{
   path: string;
 }> {
   override get message() {

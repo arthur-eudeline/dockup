@@ -190,14 +190,18 @@ const containerPostgresAccess = (
 ): Effect.Effect<PostgresAccess, ShellCommandFailureError | UndefinedVariableError | ParsingError> =>
   Effect.gen(function* _containerPostgresAccess() {
     const pg = yield* getPostgresEnvVariables(container.id);
+    // A container resolved out of `allDatabases` (see `resolveContainerTargets`)
+    // pins the exact database it was discovered with; otherwise fall back to the
+    // container's own `POSTGRES_DB`.
+    const database = (container.type === "postgres" ? container.database : undefined) ?? pg.database;
 
     // `-U`/`-d` rather than a `postgresql://user:password@…` URI: the password
     // goes through PGPASSWORD (out of the process table), and a `@`, `/` or `#`
     // in the user or database name no longer needs percent-encoding to parse.
     return {
-      dump: sh`docker exec -e PGPASSWORD ${container.id} pg_dump ${PG_DUMP_FLAGS} -U ${pg.user} -d ${pg.database}`,
+      dump: sh`docker exec -e PGPASSWORD ${container.id} pg_dump ${PG_DUMP_FLAGS} -U ${pg.user} -d ${database}`,
       password: pg.password,
-      restore: sh`docker exec -i -e PGPASSWORD ${container.id} psql ${PSQL_FLAGS} -U ${pg.user} -d ${pg.database}`,
+      restore: sh`docker exec -i -e PGPASSWORD ${container.id} psql ${PSQL_FLAGS} -U ${pg.user} -d ${database}`,
     };
   });
 
@@ -366,6 +370,85 @@ export const resolveHostTargets = (hosts: HostTarget[]): Effect.Effect<HostDisco
     );
 
     return { invalid: [...invalid], targets: groups.flat() };
+  });
+
+/**
+ * Asks a postgres container for every database it hosts, the same way
+ * `discoverInstanceDatabases` does over TCP for an `"instance"`-scoped host
+ * target — but through `docker exec`, since a container has no port declared
+ * to open a connection from outside it.
+ *
+ * Connects to the container's own `POSTGRES_DB`: unlike a host target, a
+ * container-bound role always has one to log into.
+ */
+const discoverContainerDatabases = (
+  container: ContainerBackupConfig
+): Effect.Effect<string[], ShellCommandFailureError | UndefinedVariableError | ParsingError> =>
+  Effect.gen(function* _discoverContainerDatabases() {
+    const pg = yield* getPostgresEnvVariables(container.id);
+
+    const output = yield* getShellOutput(
+      sh`docker exec -e PGPASSWORD ${container.id} psql ${PSQL_FLAGS} -U ${pg.user} -d ${pg.database} -tAc ${DISCOVER_DATABASES_QUERY}`,
+      { env: { PGPASSWORD: pg.password } }
+    );
+
+    return output
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  });
+
+/**
+ * Resolves one discovered container into the concrete backup config(s)
+ * `backup`/`restore` actually run against — trivially for every type but a
+ * postgres container declaring `dockup.backup.all-databases=true`, which is
+ * expanded into one target per database found on it, mirroring what
+ * `resolveOneHostTarget` does for an `"instance"`-scoped host target.
+ */
+const resolveContainerTarget = (
+  container: ContainerBackupConfig
+): Effect.Effect<ContainerBackupConfig[], ShellCommandFailureError | UndefinedVariableError | ParsingError> => {
+  if (container.type !== "postgres" || !container.allDatabases) {
+    return Effect.succeed([container]);
+  }
+
+  return Effect.gen(function* _resolveContainerTarget() {
+    const databases = yield* discoverContainerDatabases(container);
+    // `<name>-<database>` : same convention as an `"instance"`-scoped host
+    // target, so distinct databases never collide on one restic tag.
+    return databases.map(
+      (database): ContainerBackupConfig => ({
+        ...container,
+        backupName: `${container.backupName}-${database}`,
+        database,
+      })
+    );
+  });
+};
+
+export interface ContainerTargetResolution {
+  containers: ContainerBackupConfig[];
+  /** Containers whose databases could not be discovered — reported, never silently dropped. */
+  invalid: { id: string; error: ShellCommandFailureError | UndefinedVariableError | ParsingError }[];
+}
+
+/**
+ * Resolves every discovered container. Per-container best-effort, like
+ * `listBackupEnabledContainers` itself and `resolveHostTargets` : one postgres
+ * container being unreachable for its own discovery query must not cancel the
+ * databases another container, or a host target, would still back up.
+ */
+export const resolveContainerTargets = (
+  containers: ContainerBackupConfig[]
+): Effect.Effect<ContainerTargetResolution> =>
+  Effect.gen(function* _resolveContainerTargets() {
+    const [invalid, groups] = yield* Effect.partition(
+      containers,
+      (container) => resolveContainerTarget(container).pipe(Effect.mapError((error) => ({ id: container.id, error }))),
+      { concurrency: "unbounded" }
+    );
+
+    return { containers: groups.flat(), invalid: [...invalid] };
   });
 
 /**

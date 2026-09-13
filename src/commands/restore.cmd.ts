@@ -3,7 +3,14 @@ import chalk from "chalk";
 import { Command } from "commander";
 import { Effect } from "effect";
 
-import { restoreClickhouse, restoreMariaDB, restorePostgres, restoreVolumes, resolveHostTargets } from "../lib/backup";
+import {
+  resolveContainerTargets,
+  resolveHostTargets,
+  restoreClickhouse,
+  restoreMariaDB,
+  restorePostgres,
+  restoreVolumes,
+} from "../lib/backup";
 import { runCommand } from "../lib/cli";
 import type { ContainerDiscovery } from "../lib/docker";
 import { ensureDockerPermissions, getContainerVolumes, listBackupEnabledContainers } from "../lib/docker";
@@ -67,16 +74,23 @@ export const RestoreCommand = new Command()
 
         const hostDiscovery = yield* resolveHostTargets(config.hosts);
 
+        // Expands every `allDatabases` postgres container into one target per
+        // database found on it, the same way `backup` does.
+        const containerResolution = yield* resolveContainerTargets(discovery.containers);
+
         // An unreadable container, or a host instance that could not be reached,
         // must not hide the targets that are restorable.
         for (const { id, error } of discovery.invalid) {
           log.warn(`Ignoring ${chalk.yellow(id)} — unreadable dockup labels : ${error._tag} ${error.message}`);
         }
+        for (const { id, error } of containerResolution.invalid) {
+          log.warn(`Ignoring ${chalk.yellow(id)} — could not list its databases : ${error._tag} ${error.message}`);
+        }
         for (const { name, error } of hostDiscovery.invalid) {
           log.warn(`Ignoring host target ${chalk.yellow(name)} — ${error._tag} ${error.message}`);
         }
 
-        const { collisions, targets } = mergeTargets(hostDiscovery.targets, discovery.containers);
+        const { collisions, targets } = mergeTargets(hostDiscovery.targets, containerResolution.containers);
         for (const name of collisions) {
           log.warn(`Two targets claim the backup name ${chalk.yellow(name)} — the container one is ignored.`);
         }

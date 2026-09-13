@@ -151,7 +151,9 @@ pass `env`), MariaDB uses `MYSQL_PWD` and postgres `PGPASSWORD`. On top of that,
 and Discord payloads — a backup failure must never publish the S3 keys to a Discord channel.
 
 **Docker discovery.** `src/lib/docker.ts`. Labels: `dockup.backup.enabled=true`,
-`dockup.backup.name=<snapshot host/tag>`, `dockup.backup.type=mariadb|postgres|clickhouse|volumes`.
+`dockup.backup.name=<snapshot host/tag>`, `dockup.backup.type=mariadb|postgres|clickhouse|volumes`,
+plus `dockup.backup.all-databases=true` — postgres only, for now — for a container hosting several
+databases that should all be backed up rather than just the one named by `POSTGRES_DB`.
 Discovery shells out to `docker ps`/`docker inspect`; DB credentials are pulled from the target
 container's own env vars (`docker exec <id> env`), with `*_PASSWORD_FILE` (Docker secrets)
 resolved by `cat`-ing the file inside the container. `listBackupEnabledContainers` returns
@@ -159,6 +161,20 @@ resolved by `cat`-ing the file inside the container. `listBackupEnabledContainer
 cannot cancel the whole run; callers must report `invalid` rather than drop it. An unreachable
 docker daemon aborts `backup` only when no host target is declared: host targets never go through
 docker, and the container ones simply go unseen, which the staleness rule escalates anyway.
+
+**Backing up every database of a container** (`resolveContainerTargets`, `backup.ts`) mirrors
+`resolveHostTargets`' `"instance"` scope, but through `docker exec` instead of a TCP connection —
+a container has no port declared to reach it from outside. A container declaring
+`dockup.backup.all-databases=true` names no database up front, so `backup`/`restore` call
+`resolveContainerTargets` right after discovery to expand it into one concrete
+`ContainerBackupConfig` per database the server reports, each named `<name>-<database>` (same
+convention as an `"instance"`-scoped host target, so distinct databases never collide on one
+restic tag) and carrying that database's name so `containerPostgresAccess` dumps/restores it
+instead of falling back to `POSTGRES_DB`. Resolution is per-container best-effort, like
+`listBackupEnabledContainers` and `resolveHostTargets`: one container's discovery query failing
+must not cancel the databases another container, or a host target, would still back up.
+`config check` probes `all-databases` containers the same way, so a bad `POSTGRES_PASSWORD` shows
+up there rather than in the first nightly report.
 
 **What a restore can read from** (`src/lib/sources.ts`, pure like `targets.ts`). Since the
 destination is chosen first, the backups offered next have to be matched to it — so **every backup

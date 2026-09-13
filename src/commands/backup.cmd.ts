@@ -3,7 +3,14 @@ import chalk from "chalk";
 import { Command } from "commander";
 import { Effect, Ref } from "effect";
 
-import { backupClickhouse, backupMariaDB, backupPostgres, backupVolumes, resolveHostTargets } from "../lib/backup";
+import {
+  backupClickhouse,
+  backupMariaDB,
+  backupPostgres,
+  backupVolumes,
+  resolveContainerTargets,
+  resolveHostTargets,
+} from "../lib/backup";
 import { runCommand } from "../lib/cli";
 import { deliverDiscordMessages, formatDiscordReport } from "../lib/discord";
 import type { DiscordMessage } from "../lib/discord";
@@ -219,8 +226,11 @@ export const BackupCommand = new Command()
         // container, would still back up.
         const hostDiscovery = yield* resolveHostTargets(config.hosts);
 
-        const { containers, invalid } = containerDiscovery;
-        const { collisions, targets } = mergeTargets(hostDiscovery.targets, containers);
+        // Expands every `allDatabases` postgres container into one target per
+        // database found on it — same per-target best-effort as the host side.
+        const containerResolution = yield* resolveContainerTargets(containerDiscovery.containers);
+        const invalid = [...containerDiscovery.invalid, ...containerResolution.invalid];
+        const { collisions, targets } = mergeTargets(hostDiscovery.targets, containerResolution.containers);
 
         for (const name of collisions) {
           log.warn(`Two targets claim the backup name ${chalk.yellow(name)} — the container one is ignored.`);

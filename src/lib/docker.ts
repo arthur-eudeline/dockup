@@ -13,6 +13,10 @@ const LABELS = {
   BACKUP_ENABLED: "dockup.backup.enabled",
   BACKUP_NAME: "dockup.backup.name",
   BACKUP_TYPE: "dockup.backup.type",
+  // Postgres only, for now : one container can host several databases, and
+  // this asks dockup to discover and back up every one of them instead of just
+  // the one named by `POSTGRES_DB` (see `resolveContainerTargets` in `backup.ts`).
+  BACKUP_ALL_DATABASES: "dockup.backup.all-databases",
 };
 
 /**
@@ -38,7 +42,15 @@ const BASE_SCHEMA = z.object({
  */
 const CONTAINER_BACKUP_CONFIG_SCHEMA = z.discriminatedUnion("type", [
   BASE_SCHEMA.extend({ type: z.literal("mariadb") }),
-  BASE_SCHEMA.extend({ type: z.literal("postgres") }),
+  BASE_SCHEMA.extend({
+    type: z.literal("postgres"),
+    allDatabases: z.stringbool().default(false),
+    // Populated by `resolveContainerTargets` (`backup.ts`) once an
+    // `allDatabases` container has been expanded into one concrete target per
+    // discovered database; absent otherwise, in which case access falls back
+    // to the container's own `POSTGRES_DB`. Never read from a label directly.
+    database: z.string().optional(),
+  }),
   BASE_SCHEMA.extend({ type: z.literal("clickhouse") }),
   BASE_SCHEMA.extend({
     type: z.literal("volumes"),
@@ -77,6 +89,8 @@ const getContainerBackupConfig = (
       backupName: json["dockup.backup.name"],
       source: "container",
       type: json["dockup.backup.type"],
+      // Ignored by every type but postgres — zod strips it from the others.
+      allDatabases: json[LABELS.BACKUP_ALL_DATABASES],
     });
 
     if (error)
