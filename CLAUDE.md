@@ -44,6 +44,9 @@ pushed. Versions and `CHANGELOG.md` come from the conventional commits (see **Re
   `targets`. Declares the postgres databases running on the host, outside docker.
 - `dockup service init` (alias `setup`) / `test` / `remove` (alias `uninstall`); the `service`
   group is also aliased `cron`. Installs a systemd service + timer for a daily 02:00 backup.
+  `service test` follows the unit's journal while systemd runs it (`journalctl --follow`, forked
+  and interrupted when the run ends), because `systemctl start` on a oneshot unit blocks for the
+  whole backup and says nothing; the journal is best-effort and never fails the test.
 - `dockup upgrade` (alias `update`, flags `--check` / `--force`) — download the latest GitHub
   release for this platform and replace the running binary.
 - `dockup -v` / `--version` — print the version (commander's default `-V` is overridden).
@@ -120,14 +123,22 @@ which reports only the last command of a pipeline and so let a failed dump produ
 template: it quotes every interpolated value, and everything dockup interpolates (container ids,
 DB users, volume paths) comes from `docker inspect` / `docker exec env`. A fragment the code
 itself assembled — a list of `-v`/`-e` flags — opts out with `raw()`; never a value from outside.
-`streamShellOutput` spawns that bash itself rather than through Bun's `$`, because `$` exposes
-stdout only: restic and the database clients print their progress, their notices and the fatal
-error explaining a failure on **stderr**, so a restore used to run in silence and fail with
-nothing but an exit code. Both streams are drained concurrently and streamed to the caller's
-`TaskLog` live; only stdout is returned, since that is what the restic parsers read, and the last
-stderr lines are quoted back in the `ShellCommandFailureError`. Restic reports progress at all
-only because the restore paths set `RESTIC_PROGRESS_ENV` (`src/lib/restic.ts`) — it stays silent
-when it cannot redraw a terminal, which it never can here.
+Both spawn that bash themselves rather than going through Bun's `$`, because `$` exposes stdout
+only: restic, the database clients, systemctl and usermod all print their progress, their notices
+and the error explaining a failure on **stderr**, so a restore used to run in silence and fail
+with nothing but an exit code — as did every `sudo` step of `service init`. Both streams are
+drained concurrently (an undrained stderr pipe eventually blocks the child) and, when a `logger`
+is given, streamed to it line by line as they arrive; only stdout is returned, since that is what
+the parsers read, and the last stderr lines are quoted back in the `ShellCommandFailureError`.
+`getShellOutput` neither streams nor redacts — its output is read by the code, and some of it _is_
+the credential being looked up (`docker exec env`) — and takes `{ env, stdin }`, `stdin` being how
+`sudo tee` receives a unit file. Interruption kills the shell rather than leaving it running with
+nobody reading it. Restic reports progress at all only because the restore paths set
+`RESTIC_PROGRESS_ENV` (`src/lib/restic.ts`) — it stays silent when it cannot redraw a terminal,
+which it never can here. Two deliberate exceptions inherit the terminal instead of capturing it:
+`primeSudo()` (`utils.ts`), so sudo's password prompt is visible rather than swallowed by a
+spinner — `service test` and `upgrade` call it before their `sudo` steps — and the `dockup restic`
+passthrough, which hands restic the three streams so its progress bar and its prompts work.
 
 **Secrets never reach the outside (`src/lib/redact.ts`).** Credentials are passed to child
 processes through the environment, never on a command line: `docker run -e NAME` / `docker exec

@@ -1,7 +1,5 @@
 import { basename, dirname } from "node:path";
 
-// oxlint-disable prefer-destructuring
-import { $ } from "bun";
 import { Effect } from "effect";
 
 import { ShellCommandFailureError, FileSystemPermissionError } from "./errors";
@@ -49,37 +47,172 @@ export const sh = (strings: TemplateStringsArray, ...values: (string | ShellFrag
   return output;
 };
 
-/**
- * Runs the command through `bash` with `pipefail` on.
- *
- * Bun's built-in shell reports only the *last* command of a pipeline, so
- * `pg_dump … | restic backup --stdin` exited 0 even when the dump had failed —
- * committing an empty snapshot reported as a success. Every pipeline dockup runs
- * is a backup or a restore, so a broken left-hand side must fail the whole thing.
- */
-const bash = (cmd: string) => $`bash -o pipefail -c ${cmd}`;
+/** How many trailing stderr lines a failure quotes back in its message. */
+const ERROR_CONTEXT_LINES = 10;
 
 /** Environment handed to a child process: the ambient one plus explicit overrides. */
 const childEnv = (env?: Record<string, string>): Record<string, string | undefined> => ({ ...process.env, ...env });
 
+interface RunBashOptions {
+  /** The shell command — build it with {@link sh} when it interpolates anything */
+  cmd: string;
+  env?: Record<string, string>;
+  /** Fed to the command's stdin — for content too big or too secret for a command line. */
+  stdin?: string;
+  /** Given every line of stdout *and* stderr as it arrives. */
+  logger?: { message: (str: string) => void };
+}
+
+interface BashResult {
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Splits what a stream produced into lines *as they arrive*, and hands the whole
+ * of it back at the end.
+ *
+ * `\r` ends a line just like `\n` does: restic redraws its progress counter with
+ * a carriage return, so splitting on newlines alone turns a whole restore into a
+ * single line that only shows up once it is over. The raw text is accumulated
+ * untouched next to it, because that is what the callers parse.
+ */
+const pumpStream = async (stream: ReadableStream<Uint8Array>, onLine?: (line: string) => void): Promise<string> => {
+  const decoder = new TextDecoder();
+  let whole = "";
+  let pending = "";
+
+  const emit = (text: string, last = false) => {
+    if (!onLine) return;
+    pending += text;
+    const lines = pending.split(/\r\n|[\r\n]/);
+    // The last piece has no terminator yet — it is the start of the next line,
+    // unless the stream is over and it is all that is left.
+    pending = last ? "" : (lines.pop() ?? "");
+
+    for (const line of lines) {
+      if (!last || line.length > 0) onLine(line);
+    }
+  };
+
+  for await (const chunk of stream) {
+    const text = decoder.decode(chunk, { stream: true });
+    whole += text;
+    emit(text);
+  }
+
+  const tail = decoder.decode();
+  whole += tail;
+  emit(tail, true);
+
+  return whole;
+};
+
+/** The one process every command in dockup goes through. */
+const spawnBash = (options: RunBashOptions) =>
+  Bun.spawn(["bash", "-o", "pipefail", "-c", options.cmd], {
+    env: childEnv(options.env),
+    stderr: "pipe",
+    // Same as Bun's shell when nothing is piped in: a child left waiting on a
+    // terminal would hang an unattended run.
+    stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
+    stdout: "pipe",
+  });
+
+/**
+ * Runs a command through `bash -o pipefail -c`, streaming what it prints.
+ *
+ * Two reasons this spawns bash itself instead of using Bun's shell. `$` reports
+ * only the *last* command of a pipeline, so `pg_dump … | restic backup --stdin`
+ * exited 0 even when the dump had failed — committing an empty snapshot reported
+ * as a success; hence `pipefail`. And `$` exposes stdout only, while restic, the
+ * database clients, systemctl and sudo all say what actually went wrong on
+ * **stderr** — which used to be dropped on the floor, leaving a failed restore
+ * or a failed `service init` with nothing but an exit code to explain itself.
+ *
+ * Both streams are drained concurrently — a child whose stderr pipe fills up
+ * while nobody reads it blocks forever — but kept apart on the way out: callers
+ * parse stdout (restic's `--json` summary is looked up as its last line), and
+ * mixing the two would corrupt it.
+ */
+const runBash = (options: RunBashOptions): Effect.Effect<BashResult, ShellCommandFailureError> =>
+  Effect.gen(function* _runBash() {
+    let stderr = "";
+
+    const spawn = Effect.sync(() => spawnBash(options));
+
+    const drain = (child: ReturnType<typeof spawnBash>) =>
+      Effect.tryPromise({
+        try: async () => {
+          const onLine = options.logger ? (line: string) => options.logger?.message(redact(line)) : undefined;
+
+          const [stdout, collected] = await Promise.all([
+            pumpStream(child.stdout, onLine),
+            pumpStream(child.stderr, onLine),
+          ]);
+          stderr = collected;
+
+          const exitCode = await child.exited;
+          if (exitCode !== 0) {
+            throw new Error(`exited with code ${exitCode}`);
+          }
+
+          return { stderr, stdout } satisfies BashResult;
+        },
+        catch: (e) =>
+          new ShellCommandFailureError({
+            cause: e,
+            // What stderr said is the only thing that explains the failure, so it
+            // travels with the error — all the way to the Discord report.
+            message: redact(`The command ${options.cmd} failed${formatErrorContext(stderr)}`),
+          }),
+      });
+
+    // Interruption kills the shell instead of leaving it running with nobody
+    // reading it. A Ctrl-C reaches the whole process group anyway — this covers
+    // an interruption that comes from the code, and closes the pipes either way.
+    return yield* Effect.acquireUseRelease(spawn, drain, (child) =>
+      Effect.sync(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill();
+        }
+      })
+    );
+  });
+
+/** The tail of what a failing command said, appended to its error message. */
+const formatErrorContext = (stderr: string): string => {
+  const lines = stderr
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .slice(-ERROR_CONTEXT_LINES);
+
+  return lines.length > 0 ? `:\n${lines.join("\n")}` : "";
+};
+
+interface GetShellOutputOptions {
+  env?: Record<string, string>;
+  /** Fed to the command's stdin — for content too big or too secret for a command line. */
+  stdin?: string;
+}
+
 /**
  * Executes a shell command and returns its output trimed
+ *
+ * Nothing is streamed and nothing is redacted here : the output is read by the
+ * code, not by a human, and some of it *is* the secret being looked up (a
+ * container's `env`). Use {@link streamShellOutput} for a command whose progress
+ * someone is waiting on.
+ *
  * @param cmd The shell command — build it with {@link sh} when it interpolates anything
  * @returns The command output
  */
-export const getShellOutput = (cmd: string): Effect.Effect<string, ShellCommandFailureError> =>
-  Effect.gen(function* _getShellOutput() {
-    const result = yield* Effect.tryPromise({
-      try: () => bash(cmd).text(),
-      catch: (e) =>
-        new ShellCommandFailureError({
-          cause: e,
-          message: redact(`The command "${cmd}" failed`),
-        }),
-    }).pipe(Effect.map((r) => r.trim()));
-
-    return yield* Effect.succeed(result);
-  });
+export const getShellOutput = (
+  cmd: string,
+  options: GetShellOutputOptions = {}
+): Effect.Effect<string, ShellCommandFailureError> =>
+  runBash({ cmd, env: options.env, stdin: options.stdin }).pipe(Effect.map((result) => result.stdout.trim()));
 
 interface StreamShellOutputArgs {
   /** The shell command — build it with {@link sh} when it interpolates anything */
@@ -90,109 +223,38 @@ interface StreamShellOutputArgs {
   onSuccess?: () => void;
 }
 
-/** How many trailing stderr lines a failure quotes back in its message. */
-const ERROR_CONTEXT_LINES = 10;
-
 /**
- * Splits a byte stream into lines *as they arrive*.
- *
- * `\r` ends a line just like `\n` does: restic redraws its progress counter with
- * a carriage return, so splitting on newlines alone turns a whole restore into a
- * single line that only shows up once it is over.
- *
- * @yields Each complete line, without its terminator.
- */
-const readLines = async function* _readLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
-  const decoder = new TextDecoder();
-  let pending = "";
-
-  for await (const chunk of stream) {
-    pending += decoder.decode(chunk, { stream: true });
-    const lines = pending.split(/\r\n|[\r\n]/);
-    // The last piece has no terminator yet — it is the start of the next line.
-    pending = lines.pop() ?? "";
-
-    for (const line of lines) {
-      yield line;
-    }
-  }
-
-  pending += decoder.decode();
-  if (pending.length > 0) {
-    yield pending;
-  }
-};
-
-/**
- * Runs a command and streams every line it prints to `logger`, live.
- *
- * Both streams are read, and read *concurrently* — a child whose stderr pipe
- * fills up while nobody drains it blocks forever. They are kept apart on the way
- * out though: only stdout is returned, because callers parse that (restic's
- * `--json` summary is looked up as the last line), while restic and the database
- * clients say everything else — progress counters, notices, the fatal error that
- * explains a failed restore — on stderr. Bun's shell drops stderr entirely, which
- * is why a restore used to run in complete silence and fail with nothing but an
- * exit code.
+ * Runs a command and streams every line it prints — stdout *and* stderr — to
+ * `logger`, live, as it arrives. Only stdout is returned.
  */
 export const streamShellOutput = (args: StreamShellOutputArgs): Effect.Effect<string, ShellCommandFailureError> =>
-  Effect.gen(function* _streamShellOutput() {
-    const output: string[] = [];
-    const errors: string[] = [];
+  runBash({ cmd: args.cmd, env: args.env, logger: args.logger }).pipe(
+    Effect.tapError((failure) => Effect.sync(() => args.onError?.(failure.cause))),
+    Effect.tap(() => Effect.sync(() => args.onSuccess?.())),
+    // Unlike `getShellOutput`, this output is never a credential — it is restic
+    // JSON or a list of database names — and it ends up quoted in parsing errors.
+    Effect.map((result) => redact(result.stdout))
+  );
 
-    const spawn = Effect.sync(() =>
-      Bun.spawn(["bash", "-o", "pipefail", "-c", args.cmd], {
-        env: childEnv(args.env),
-        stderr: "pipe",
-        // Same as Bun's shell: nothing on the outside feeds these commands, and a
-        // child left waiting on a terminal would hang an unattended run.
-        stdin: "ignore",
-        stdout: "pipe",
-      })
-    );
+/**
+ * Asks sudo for its password now, on the terminal.
+ *
+ * Every other command here captures stderr — which is where sudo writes its
+ * prompt — so a password asked from inside a spinner or a task log is invisible
+ * and the command just looks frozen. This one inherits the terminal instead, and
+ * the cached credentials carry the `sudo` commands that follow.
+ */
+export const primeSudo = (): Effect.Effect<void, ShellCommandFailureError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const proc = Bun.spawn(["sudo", "-v"], { stderr: "inherit", stdin: "inherit", stdout: "inherit" });
+      await proc.exited;
 
-    const drain = (child: Bun.Subprocess<"ignore", "pipe", "pipe">) =>
-      Effect.tryPromise({
-        try: async () => {
-          const pump = async (stream: ReadableStream<Uint8Array>, collected: string[]) => {
-            for await (const line of readLines(stream)) {
-              const safe = redact(line);
-              collected.push(safe);
-              args.logger?.message(safe);
-            }
-          };
-
-          await Promise.all([pump(child.stdout, output), pump(child.stderr, errors)]);
-
-          const exitCode = await child.exited;
-          if (exitCode !== 0) {
-            throw new Error(`exited with code ${exitCode}`);
-          }
-        },
-        catch: (e) => {
-          args.onError?.(e);
-          const context = errors.slice(-ERROR_CONTEXT_LINES).join("\n");
-
-          return new ShellCommandFailureError({
-            cause: e,
-            message: redact(`The command ${args.cmd} failed${context.length > 0 ? `:\n${context}` : ""}`),
-          });
-        },
-      });
-
-    // Interruption kills the shell instead of leaving it running with nobody
-    // reading it. A Ctrl-C reaches the whole process group anyway — this covers
-    // an interruption that comes from the code, and closes the pipes either way.
-    yield* Effect.acquireUseRelease(spawn, drain, (child) =>
-      Effect.sync(() => {
-        if (child.exitCode === null && child.signalCode === null) {
-          child.kill();
-        }
-      })
-    );
-
-    args.onSuccess?.();
-    return output.join("\n");
+      if (proc.exitCode !== 0) {
+        throw new Error(`sudo -v exited with code ${proc.exitCode}`);
+      }
+    },
+    catch: (e) => new ShellCommandFailureError({ cause: e, message: "sudo authentication failed" }),
   });
 
 /** Where `upload.sh` and `dockup upgrade` install the compiled binary. */
@@ -313,27 +375,10 @@ export const formatHumanDate = (date: Date) => {
  *
  * @param filePath The *file* to be written — its parent directory is the one tested
  */
-export const ensureWritePermission = (
-  filePath: string
-): Effect.Effect<void, FileSystemPermissionError | ShellCommandFailureError, never> =>
-  Effect.gen(function* _ensureWritePermission() {
-    const dir = dirname(filePath);
-
-    // `nothrow`: a non-zero `test -w` is the answer, not an error to catch.
-    const exitCode = yield* Effect.tryPromise({
-      try: () =>
-        $`test -w ${dir}`
-          .quiet()
-          .nothrow()
-          .then((r) => r.exitCode),
-      catch: (e) =>
-        new ShellCommandFailureError({
-          cause: e,
-          message: `Failed to test write permission for path ${filePath}`,
-        }),
-    });
-
-    if (exitCode !== 0) {
-      return yield* Effect.fail(new FileSystemPermissionError({ path: filePath }));
-    }
-  });
+export const ensureWritePermission = (filePath: string): Effect.Effect<void, FileSystemPermissionError, never> =>
+  // A non-zero `test -w` is the answer, not an error to report : both it and a
+  // shell that could not even run mean the same thing to the caller.
+  getShellOutput(sh`test -w ${dirname(filePath)}`).pipe(
+    Effect.asVoid,
+    Effect.catchAll(() => Effect.fail(new FileSystemPermissionError({ path: filePath })))
+  );

@@ -1,4 +1,4 @@
-import { $, spawn } from "bun";
+import { spawn } from "bun";
 import chalk from "chalk";
 import { Effect } from "effect";
 import { z } from "zod";
@@ -7,7 +7,7 @@ import type { Config } from "./config";
 import { ConfigTag } from "./effect";
 import { EmptyBackupError, ParsingError, ShellCommandFailureError, ResticRepoNotInitializedError } from "./errors";
 import { redact, registerSecret } from "./redact";
-import { formatBytes, formatDuration, formatHumanDate } from "./utils";
+import { formatBytes, formatDuration, formatHumanDate, getShellOutput, sh } from "./utils";
 
 // oxlint-disable-next-line typescript/consistent-type-definitions
 export type ResticConf = {
@@ -60,11 +60,22 @@ export const restic = (args: string[]): Effect.Effect<number, ShellCommandFailur
     const env = yield* configToResticEnv(config);
 
     return yield* Effect.tryPromise({
-      try: () =>
-        $`restic ${args}`
-          .env({ ...process.env, ...env })
-          .nothrow()
-          .then((v) => v.exitCode),
+      try: async () => {
+        // The three streams are inherited rather than piped: this is a
+        // passthrough, so restic talks to the terminal directly — its progress
+        // bar redraws, and a command that asks something can be answered.
+        const proc = spawn({
+          cmd: ["restic", ...args],
+          env: { ...process.env, ...env },
+          stderr: "inherit",
+          stdin: "inherit",
+          stdout: "inherit",
+        });
+
+        await proc.exited;
+        // A restic killed by a signal reports no exit code — still a failure.
+        return proc.exitCode ?? 1;
+      },
       catch: (e) =>
         new ShellCommandFailureError({
           cause: e,
@@ -150,13 +161,10 @@ export const resticCleanUp = (): Effect.Effect<ResticCleanUpStructuredOutput, Sh
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 
-    const output = yield* Effect.tryPromise({
-      try: () =>
-        $`restic forget --group-by tags --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --json`
-          .env({ ...process.env, ...env })
-          .text(),
-      catch: (e) => new ShellCommandFailureError({ cause: e, message: `The restic forget command failed` }),
-    });
+    const output = yield* getShellOutput(
+      "restic forget --group-by tags --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --json",
+      { env }
+    );
 
     return yield* parseForgetPruneOutput(output);
   });
@@ -285,11 +293,7 @@ export const listSnapshots = (
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 
-    const output = yield* Effect.tryPromise({
-      try: () => $`restic snapshots --tag ${tag} --json`.env({ ...process.env, ...env }).text(),
-      catch: (e) =>
-        new ShellCommandFailureError({ cause: e, message: "The restic snapshot list command error failed" }),
-    });
+    const output = yield* getShellOutput(sh`restic snapshots --tag ${tag} --json`, { env });
 
     return yield* parseResticSnapshotListOutput(output);
   });

@@ -3,7 +3,6 @@
 import { exists } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { $ } from "bun";
 import { Effect } from "effect";
 import { z } from "zod";
 
@@ -143,12 +142,13 @@ export const writeConfig = (config: Config): Effect.Effect<void, ShellCommandFai
     // Typed failure rather than `Effect<void, never>`: these are three shell
     // operations that can very much fail, and a defect would be rendered as
     // "This is a bug in dockup" instead of a permission problem.
+    const dir = dirname(configPath);
+    if (!(yield* Effect.promise(() => exists(dir)))) {
+      yield* getShellOutput(sh`mkdir -p ${dir}`);
+    }
+
     yield* Effect.tryPromise({
-      try: async () => {
-        const dir = dirname(configPath);
-        if (!(await exists(dir))) await $`mkdir -p ${dir}`;
-        await encryptFile(configPath, JSON.stringify(config));
-      },
+      try: () => encryptFile(configPath, JSON.stringify(config)),
       catch: (e) =>
         new ShellCommandFailureError({
           cause: e,
@@ -193,7 +193,8 @@ export const removeConfigPermission = (): Effect.Effect<void, ShellCommandFailur
   });
 
 export const checkIfUserExists = (): Effect.Effect<boolean, never> =>
-  Effect.tryPromise(() => $`getent passwd ${DOCKUP_SHELL_USER}`.quiet().then(() => true)).pipe(
+  getShellOutput(`getent passwd ${DOCKUP_SHELL_USER}`).pipe(
+    Effect.as(true),
     Effect.catchAll(() => Effect.succeed(false))
   );
 
@@ -210,7 +211,8 @@ export const deleteUser = (): Effect.Effect<void, ShellCommandFailureError> =>
  * `docker`, and `dockup-admins` yes for `dockup`.
  */
 const isUserInGroup = (user: string, group: string): Effect.Effect<boolean, never> =>
-  Effect.tryPromise(() => $`id -nG ${user}`.text().then((r) => r.trim().split(/\s+/).includes(group))).pipe(
+  getShellOutput(sh`id -nG ${user}`).pipe(
+    Effect.map((groups) => groups.split(/\s+/).includes(group)),
     Effect.catchAll(() => Effect.succeed(false))
   );
 
@@ -224,14 +226,16 @@ export const checkIfCurrentUserIsInDockupGroup = (): Effect.Effect<boolean, neve
   );
 
 export const addUserToDockerGroup = (): Effect.Effect<void, ShellCommandFailureError> =>
-  Effect.tryPromise({
-    try: () => $`sudo usermod -aG docker ${DOCKUP_SHELL_USER}`,
-    catch: (e) =>
-      new ShellCommandFailureError({
-        cause: e,
-        message: `Failed to add ${DOCKUP_SHELL_USER} user to docker group`,
-      }),
-  });
+  getShellOutput(`sudo usermod -aG docker ${DOCKUP_SHELL_USER}`).pipe(
+    Effect.asVoid,
+    Effect.mapError(
+      (cause) =>
+        new ShellCommandFailureError({
+          cause,
+          message: `Failed to add ${DOCKUP_SHELL_USER} user to docker group\n${cause.message}`,
+        })
+    )
+  );
 
 export const addCurrentUserToDockupGroup = (): Effect.Effect<string, ShellCommandFailureError> =>
   Effect.gen(function* _addCurrentUserToDockupGroup() {
@@ -241,14 +245,15 @@ export const addCurrentUserToDockupGroup = (): Effect.Effect<string, ShellComman
     // `usermod -aG $USER dockup`, which added the *service account* to the
     // invoking user's group — the exact opposite, and a grant of the root group
     // to an account already in `docker` whenever init was run under sudo.
-    yield* Effect.tryPromise({
-      try: () => $`sudo usermod -aG ${DOCKUP_SHELL_USER} ${currentUser}`.quiet(),
-      catch: (e) =>
-        new ShellCommandFailureError({
-          message: `Failed to add ${currentUser} to the ${DOCKUP_SHELL_USER} group`,
-          cause: e,
-        }),
-    });
+    yield* getShellOutput(sh`sudo usermod -aG ${DOCKUP_SHELL_USER} ${currentUser}`).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ShellCommandFailureError({
+            cause,
+            message: `Failed to add ${currentUser} to the ${DOCKUP_SHELL_USER} group\n${cause.message}`,
+          })
+      )
+    );
 
     return currentUser;
   });

@@ -1,9 +1,8 @@
-import { $ } from "bun";
 import { Effect } from "effect";
 
 import { DOCKUP_SHELL_USER } from "./config";
 import { ShellCommandFailureError } from "./errors";
-import { resolveBinaryPath } from "./utils";
+import { getShellOutput, resolveBinaryPath, sh } from "./utils";
 
 export const SERVICE_NAME = "dockup-auto-backup";
 export const SERVICE_PATH = `/etc/systemd/system/${SERVICE_NAME}.service`;
@@ -17,14 +16,16 @@ export const TIMER_PATH = `/etc/systemd/system/${SERVICE_NAME}.timer`;
  * rather than making the whole command require being run as root.
  */
 const writeSystemFile = (path: string, content: string): Effect.Effect<void, ShellCommandFailureError> =>
-  Effect.tryPromise({
-    try: () => $`sudo tee ${path} < ${Buffer.from(content)}`.quiet(),
-    catch: (e) =>
-      new ShellCommandFailureError({
-        cause: e,
-        message: `Failed to create ${path} file.`,
-      }),
-  });
+  getShellOutput(sh`sudo tee ${path}`, { stdin: content }).pipe(
+    Effect.asVoid,
+    Effect.mapError(
+      (cause) =>
+        new ShellCommandFailureError({
+          cause,
+          message: `Failed to create ${path} file.\n${cause.message}`,
+        })
+    )
+  );
 
 /**
  * `ExecStart` must be an absolute path — systemd refuses the unit otherwise
@@ -60,16 +61,19 @@ WantedBy=timers.target
 `
   );
 
-export const registerService = () =>
-  Effect.tryPromise({
-    try: async () => {
-      await $`sudo systemctl daemon-reload`.quiet();
-      await $`sudo systemctl enable ${SERVICE_NAME}.timer`.quiet();
-      await $`sudo systemctl start ${SERVICE_NAME}.timer`.quiet();
-    },
-    catch: (e) =>
-      new ShellCommandFailureError({
-        message: `Failed to register service`,
-        cause: e,
-      }),
-  });
+export const registerService = (): Effect.Effect<void, ShellCommandFailureError> =>
+  Effect.gen(function* _registerService() {
+    // Sequential and abort-on-first : enabling a timer systemd has not reloaded
+    // yet, or starting one it refused to enable, only compounds the failure.
+    yield* getShellOutput("sudo systemctl daemon-reload");
+    yield* getShellOutput(`sudo systemctl enable ${SERVICE_NAME}.timer`);
+    yield* getShellOutput(`sudo systemctl start ${SERVICE_NAME}.timer`);
+  }).pipe(
+    Effect.mapError(
+      (cause) =>
+        new ShellCommandFailureError({
+          cause,
+          message: `Failed to register service\n${cause.message}`,
+        })
+    )
+  );

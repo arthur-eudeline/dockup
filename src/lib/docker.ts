@@ -1,4 +1,3 @@
-import { $ } from "bun";
 import { Effect } from "effect";
 import { z } from "zod";
 
@@ -130,14 +129,18 @@ export const listBackupEnabledContainers = (): Effect.Effect<
   });
 
 export const ensureDockerPermissions = () =>
-  Effect.tryPromise({
-    try: () => $`docker ps`.quiet(),
-    catch: (e) =>
-      new PermissionError({
-        cause: e,
-        message: "You don't have the permission to use the docker commands",
-      }),
-  });
+  getShellOutput("docker ps").pipe(
+    Effect.asVoid,
+    Effect.mapError(
+      (cause) =>
+        new PermissionError({
+          cause,
+          // What docker said distinguishes the two cases that matter here : a
+          // daemon that is down, and a user who is not in the `docker` group.
+          message: `You don't have the permission to use the docker commands\n${cause.message}`,
+        })
+    )
+  );
 
 const VOLUME_SCHEMA = z.discriminatedUnion("Type", [
   z.object({

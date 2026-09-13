@@ -2,13 +2,19 @@ import { chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { $ } from "bun";
 import { Effect } from "effect";
 import { z } from "zod";
 
 import { ParsingError, ReleaseFetchError, UnsupportedPlatformError, UpgradeError } from "./errors";
 import type { ShellCommandFailureError } from "./errors";
-import { ensureWritePermission, getShellOutput, raw, resolveBinaryPath, sh } from "./utils";
+import {
+  ensureWritePermission,
+  getShellOutput,
+  primeSudo as primeSudoOnTerminal,
+  raw,
+  resolveBinaryPath,
+  sh,
+} from "./utils";
 import { VERSION } from "./version";
 
 export const GITHUB_REPO = "arthur-eudeline/dockup";
@@ -216,19 +222,11 @@ export const needsSudo = (target: string): Effect.Effect<boolean> =>
     Effect.catchAll(() => Effect.succeed(true))
   );
 
-/**
- * Asks sudo for its password now, so the install itself can stay silent.
- *
- * `getShellOutput` captures stderr, which is where sudo writes its prompt: a
- * password asked from inside the install step would be invisible, and the user
- * would face a spinner quietly waiting on stdin. This runs the prompt on the
- * inherited terminal instead, then the cached credentials carry the install.
- */
+/** Asks sudo for its password before the install starts — see {@link primeSudoOnTerminal}. */
 export const primeSudo = (): Effect.Effect<void, UpgradeError> =>
-  Effect.tryPromise({
-    try: () => $`sudo -v`,
-    catch: (e) => new UpgradeError({ cause: e, message: `sudo authentication failed : ${describe(e)}` }),
-  });
+  primeSudoOnTerminal().pipe(
+    Effect.mapError((cause) => new UpgradeError({ cause, message: `sudo authentication failed : ${describe(cause)}` }))
+  );
 
 /**
  * Writes the downloaded binary over the running one.
