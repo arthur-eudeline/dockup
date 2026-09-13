@@ -1,3 +1,12 @@
+## dockup@0.4.0
+
+### Features
+
+- Improve prompts labels (b78bbb1)
+- Restore to target (1f8d7c7)
+- Stream lines (18e70b2)
+- Streaming progression on restore (001d97c)
+
 ## dockup@0.3.0
 
 ### Features
