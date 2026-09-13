@@ -1,5 +1,5 @@
 // oxlint-disable promise/prefer-await-to-then
-import { isCancel, log, S_SUCCESS, select, spinner, taskLog } from "@clack/prompts";
+import { confirm, isCancel, log, S_SUCCESS, select, spinner, taskLog } from "@clack/prompts";
 import type { SelectOptions } from "@clack/prompts";
 import chalk from "chalk";
 import { Effect } from "effect";
@@ -7,6 +7,8 @@ import { Effect } from "effect";
 import type { AnyTaggedError } from "./effect";
 import { PromptCancelledError } from "./errors";
 import type { ResticSnapshotItemStructredOutput } from "./restic";
+import { describeSource } from "./sources";
+import type { BackupSource } from "./sources";
 import type { BackupTarget } from "./targets";
 import type { TaskLog } from "./types";
 
@@ -38,9 +40,10 @@ export const prompt = <T>(run: () => Promise<T | symbol>): Effect.Effect<T, Prom
 export const promptSelect = <T>(args: SelectOptions<T>): Effect.Effect<T, PromptCancelledError> =>
   prompt(() => select<T>(args));
 
+/** Where the data is going — asked first, because it decides what can be offered next. */
 export const promptSelectTarget = (targets: BackupTarget[]): Effect.Effect<BackupTarget, PromptCancelledError, never> =>
   promptSelect({
-    message: "Choose which backup to restore",
+    message: "Choose what to restore into",
     options: targets.map((target) => ({
       label: target.backupName,
       // The source matters here: restoring a host target writes straight into a
@@ -50,6 +53,27 @@ export const promptSelectTarget = (targets: BackupTarget[]): Effect.Effect<Backu
     })),
   } as SelectOptions<BackupTarget>);
 
+/**
+ * Which backup the data comes from.
+ *
+ * The destination's own backup is preselected when it still has one, so the
+ * ordinary restore stays a matter of pressing enter, and restoring *another*
+ * backup into this target is a deliberate move down the list.
+ */
+export const promptSelectSource = (
+  sources: BackupSource[],
+  destination: BackupTarget
+): Effect.Effect<BackupSource, PromptCancelledError, never> =>
+  promptSelect({
+    initialValue: sources.find((source) => source.backupName === destination.backupName),
+    message: `Choose the backup to restore into ${chalk.blue(destination.backupName)}`,
+    options: sources.map((source) => ({
+      hint: describeSource(source, destination),
+      label: source.backupName === destination.backupName ? source.backupName : chalk.yellow(source.backupName),
+      value: source,
+    })),
+  } as SelectOptions<BackupSource>);
+
 export const promptSelectSnapshot = (snapshots: ResticSnapshotItemStructredOutput[]) =>
   promptSelect({
     message: "Choose a snapshot",
@@ -57,6 +81,18 @@ export const promptSelectSnapshot = (snapshots: ResticSnapshotItemStructredOutpu
       label: `${chalk.yellow(snapshot.id)} - ${snapshot.size}\t ${snapshot.relativeDate}`,
       value: snapshot,
     })),
+  });
+
+/**
+ * Asks before doing something the user did not ask for twice.
+ *
+ * Declining is a cancellation, not a failure: it goes through
+ * `PromptCancelledError` like a Ctrl-C, so the command stops the same way.
+ */
+export const promptConfirm = (message: string): Effect.Effect<void, PromptCancelledError> =>
+  Effect.gen(function* _promptConfirm() {
+    const accepted = yield* prompt(() => confirm({ initialValue: false, message }));
+    if (!accepted) return yield* Effect.fail(new PromptCancelledError({}));
   });
 
 /**

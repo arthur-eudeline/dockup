@@ -38,7 +38,7 @@ const renderError = (error: AnyTaggedError): number => {
     return 130;
   }
 
-  if (error._tag === "NO_SNAPSHOTS_ERROR") {
+  if (error._tag === "NO_SNAPSHOTS_ERROR" || error._tag === "NO_COMPATIBLE_BACKUP_ERROR") {
     log.warn(error.message);
     return 1;
   }

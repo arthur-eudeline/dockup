@@ -36,6 +36,12 @@ export interface HostBackupTarget {
 
 export type BackupTarget = ContainerBackupConfig | HostBackupTarget;
 
+/** What dockup knows how to back up — and what a snapshot's `dockup.type=` tag names. */
+export type BackupType = BackupTarget["type"];
+
+/** The same, as values : what a tag read back off a snapshot is checked against. */
+export const BACKUP_TYPES = ["mariadb", "postgres", "volumes"] as const satisfies readonly BackupType[];
+
 /** The targets `backupPostgres` / `restorePostgres` know how to handle. */
 export type PostgresTarget = Extract<BackupTarget, { type: "postgres" }>;
 

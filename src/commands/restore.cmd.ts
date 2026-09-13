@@ -6,16 +6,29 @@ import { Effect } from "effect";
 import { restoreMariaDB, restorePostgres, restoreVolumes, resolveHostTargets } from "../lib/backup";
 import { runCommand } from "../lib/cli";
 import type { ContainerDiscovery } from "../lib/docker";
-import { ensureDockerPermissions, listBackupEnabledContainers } from "../lib/docker";
+import { ensureDockerPermissions, getContainerVolumes, listBackupEnabledContainers } from "../lib/docker";
 import { ConfigTag } from "../lib/effect";
-import { NoSnapshotsError } from "../lib/errors";
-import { promptSelectSnapshot, promptSelectTarget, streamingTaskLog } from "../lib/prompts";
+import { NoCompatibleBackupError, NoSnapshotsError } from "../lib/errors";
+import {
+  promptConfirm,
+  promptSelectSnapshot,
+  promptSelectSource,
+  promptSelectTarget,
+  streamingTaskLog,
+} from "../lib/prompts";
 import { listSnapshots } from "../lib/restic";
+import { compatibleSources, dumpPath, groupSnapshotsIntoSources } from "../lib/sources";
 import { mergeTargets } from "../lib/targets";
 import type { TaskLog } from "../lib/types";
 
 /**
- * Restores a restic snapshot into its container.
+ * Restores a snapshot into a target.
+ *
+ * Destination first, data second: a target is picked among those discovered on
+ * this host, and only then the backup to pour into it — any backup that fits,
+ * not just the one bearing its name (see `sources.ts` for what "fits" means).
+ * That is what makes restoring one database into another, or last month's
+ * container into the one that replaced it, possible at all.
  *
  * The whole flow is a single Effect handed to `runCommand`: discovery, prompts
  * and the restore itself all report through the typed error channel, so any
@@ -75,26 +88,52 @@ export const RestoreCommand = new Command()
           return;
         }
 
+        // 1. Where the data goes. Asked first : the destination is what decides
+        //    which backups are worth offering at all.
         const target = yield* promptSelectTarget(targets);
 
-        const snapshots = yield* listSnapshots(target.backupName);
+        const snapshots = yield* listSnapshots();
         if (snapshots.length === 0) {
           return yield* Effect.fail(new NoSnapshotsError({ backupName: target.backupName }));
         }
 
-        const snapshot = yield* promptSelectSnapshot(snapshots);
+        // A volume restore writes a snapshot back to the absolute paths it was
+        // taken from, so what this container mounts is what decides whether a
+        // snapshot has anything to give it.
+        const destinationPaths =
+          target.type === "volumes" ? (yield* getContainerVolumes(target.id)).map((volume) => volume.Destination) : [];
+
+        // 2. What is poured into it, among the backups that fit.
+        const sources = compatibleSources(target, groupSnapshotsIntoSources(snapshots, targets), destinationPaths);
+        if (sources.length === 0) {
+          return yield* Effect.fail(new NoCompatibleBackupError({ backupName: target.backupName, type: target.type }));
+        }
+
+        const source = yield* promptSelectSource(sources, target);
+        const snapshot = yield* promptSelectSnapshot(source.snapshots);
+
+        // Restoring a backup into the target it came from is the ordinary case;
+        // pouring one target's data into another is not, and it overwrites what
+        // is there — so it is confirmed rather than assumed.
+        if (source.backupName !== target.backupName) {
+          yield* promptConfirm(
+            `Restore ${chalk.yellow(source.backupName)} into ${chalk.blue(target.backupName)}? Its current data is overwritten.`
+          );
+        }
 
         const logger: TaskLog = streamingTaskLog(
-          `Restoring ${chalk.blue(target.backupName)} from snapshot ${chalk.yellow(snapshot.id)} (${snapshot.relativeDate})`
+          `Restoring ${chalk.blue(target.backupName)} from ${chalk.yellow(source.backupName)} snapshot ${chalk.yellow(snapshot.id)} (${snapshot.relativeDate})`
         );
+
+        const dump = { path: dumpPath(snapshot, source), snapshotId: snapshot.id };
 
         const restore = Effect.gen(function* _doRestore() {
           switch (target.type) {
             case "postgres": {
-              return yield* restorePostgres(target, snapshot.id, logger);
+              return yield* restorePostgres(target, dump, logger);
             }
             case "mariadb": {
-              return yield* restoreMariaDB(target, snapshot.id, logger);
+              return yield* restoreMariaDB(target, dump, logger);
             }
             case "volumes": {
               return yield* restoreVolumes(target, snapshot.id, logger);

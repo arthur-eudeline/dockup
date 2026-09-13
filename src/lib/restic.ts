@@ -161,8 +161,12 @@ export const resticCleanUp = (): Effect.Effect<ResticCleanUpStructuredOutput, Sh
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 
+    // `--group-by host`, not `--group-by tags` : every backup is taken with
+    // `--host <backupName>`, so the groups are identical — but grouping by tags
+    // would put a snapshot carrying `dockup.type=…` in a *different* group from
+    // an older one without it, and each group would then keep its own 7/4/3.
     const output = yield* getShellOutput(
-      "restic forget --group-by tags --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --json",
+      "restic forget --group-by host --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --json",
       { env }
     );
 
@@ -241,9 +245,17 @@ export const parseResticBackupOutput = (
 const RESTIC_BACKUP_LINE_SCHEMA = z.object({
   time: z.coerce.date(),
   short_id: z.string(),
-  summary: z.object({
-    total_bytes_processed: z.number(),
-  }),
+  // Both are absent rather than empty when a snapshot has none, and `summary`
+  // is missing altogether on snapshots written by restic < 0.17 — the whole
+  // listing is now read at once (see `listSnapshots`), so one foreign snapshot
+  // sitting in the repository must not make it unparseable.
+  paths: z.array(z.string()).default([]),
+  tags: z.array(z.string()).default([]),
+  summary: z
+    .object({
+      total_bytes_processed: z.number(),
+    })
+    .optional(),
 });
 
 export interface ResticSnapshotItemStructredOutput {
@@ -251,6 +263,10 @@ export interface ResticSnapshotItemStructredOutput {
   relativeDate: string;
   id: string;
   size: string;
+  /** Restic's tags, verbatim. What dockup writes in them is `sources.ts`' business. */
+  tags: string[];
+  /** What the snapshot holds : `/<name>.sql` for a dump, the mount points for volumes. */
+  paths: string[];
 }
 
 export const parseResticSnapshotListOutput = (
@@ -279,21 +295,33 @@ export const parseResticSnapshotListOutput = (
     return data
       .map((line) => ({
         date: line.time,
-        relativeDate: formatHumanDate(line.time),
         id: line.short_id,
-        size: formatBytes(line.summary.total_bytes_processed),
+        paths: line.paths,
+        relativeDate: formatHumanDate(line.time),
+        size: formatBytes(line.summary?.total_bytes_processed ?? 0),
+        tags: line.tags,
       }))
       .toSorted((a, b) => b.date.getTime() - a.date.getTime());
   });
 
+/**
+ * Lists the repository's snapshots, newest first.
+ *
+ * Without a tag it returns every snapshot there is : `restore` picks its
+ * destination first and then needs to see *all* the backups to offer the ones
+ * that would fit it, not just the one bearing the same name.
+ *
+ * @param tag Restrict the listing to one backup name
+ */
 export const listSnapshots = (
-  tag: string
+  tag?: string
 ): Effect.Effect<ResticSnapshotItemStructredOutput[], ShellCommandFailureError | ParsingError, ConfigTag> =>
   Effect.gen(function* _listSnapshots() {
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
 
-    const output = yield* getShellOutput(sh`restic snapshots --tag ${tag} --json`, { env });
+    const filter = tag === undefined ? "" : sh` --tag ${tag}`;
+    const output = yield* getShellOutput(`restic snapshots --json${filter}`, { env });
 
     return yield* parseResticSnapshotListOutput(output);
   });

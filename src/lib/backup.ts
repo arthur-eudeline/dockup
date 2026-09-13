@@ -16,6 +16,7 @@ import { ShellCommandFailureError, UndefinedVariableError } from "./errors";
 import { registerSecret } from "./redact";
 import { configToResticEnv, parseResticBackupOutput, RESTIC_PROGRESS_ENV } from "./restic";
 import type { ResticSuccessfulBackupStructuredOutput } from "./restic";
+import { typeTag } from "./sources";
 import type { HostBackupTarget, PostgresTarget, ResolvedHostConnection } from "./targets";
 import type { TaskLog } from "./types";
 import { getShellOutput, raw, sh, shellQuote, streamShellOutput } from "./utils";
@@ -82,7 +83,7 @@ export const backupMariaDB = (
     // `--password=…`, keeping it out of the process table and of any error
     // message quoting the command.
     const output = yield* streamShellOutput({
-      cmd: sh`docker exec -e MYSQL_PWD ${container.id} mariadb-dump -u ${mdb.user} --databases ${mdb.database} --skip-comments | restic backup --stdin --stdin-filename ${`${container.backupName}.sql`} --tag ${container.backupName} --skip-if-unchanged --json --host ${container.backupName}`,
+      cmd: sh`docker exec -e MYSQL_PWD ${container.id} mariadb-dump -u ${mdb.user} --databases ${mdb.database} --skip-comments | restic backup --stdin --stdin-filename ${`${container.backupName}.sql`} --tag ${container.backupName} --tag ${typeTag("mariadb")} --skip-if-unchanged --json --host ${container.backupName}`,
       env: { ...env, MYSQL_PWD: mdb.password },
       logger,
     });
@@ -91,15 +92,28 @@ export const backupMariaDB = (
   });
 
 /**
- * restore postgres backup
+ * The dump a database restore reads back, and where it sits in the snapshot.
  *
- * @param container the container infos
- * @param snapshotId the snapshot id to restore
+ * The path is not `/<target>.sql`: the file is named after the backup it was
+ * taken from, and `restore` can now be told to pour one backup into another
+ * target (see `sources.ts`), so the two names part ways.
+ */
+export interface DumpToRestore {
+  snapshotId: string;
+  /** The dump's path *inside the snapshot*, as restic recorded it. */
+  path: string;
+}
+
+/**
+ * restore a mariadb backup into a container
+ *
+ * @param container the container to restore into
+ * @param dump the dump to read back
  * @returns void
  */
 export const restoreMariaDB = (
   container: ContainerBackupConfig,
-  snapshotId: string,
+  dump: DumpToRestore,
   logger: TaskLog
 ): Effect.Effect<void, ShellCommandFailureError | UndefinedVariableError | ParsingError, ConfigTag> =>
   Effect.gen(function* _restoreMariaDB() {
@@ -110,7 +124,7 @@ export const restoreMariaDB = (
     yield* streamShellOutput({
       // The dump was taken with `--databases`, so it carries its own CREATE/USE:
       // no target database is passed here.
-      cmd: sh`restic dump ${snapshotId} ${`/${container.backupName}.sql`} | docker exec -i -e MYSQL_PWD ${container.id} mariadb -u ${mdb.user}`,
+      cmd: sh`restic dump ${dump.snapshotId} ${dump.path} | docker exec -i -e MYSQL_PWD ${container.id} mariadb -u ${mdb.user}`,
       env: { ...env, ...RESTIC_PROGRESS_ENV, MYSQL_PWD: mdb.password },
       logger,
     });
@@ -374,7 +388,7 @@ export const backupPostgres = (
     const env = yield* configToResticEnv(config);
 
     const output = yield* streamShellOutput({
-      cmd: sh`${raw(access.dump)} | restic backup --stdin --stdin-filename ${`${target.backupName}.sql`} --tag ${target.backupName} --skip-if-unchanged --json --host ${target.backupName}`,
+      cmd: sh`${raw(access.dump)} | restic backup --stdin --stdin-filename ${`${target.backupName}.sql`} --tag ${target.backupName} --tag ${typeTag("postgres")} --skip-if-unchanged --json --host ${target.backupName}`,
       env: { ...env, PGPASSWORD: access.password },
       logger,
     });
@@ -383,15 +397,15 @@ export const backupPostgres = (
   });
 
 /**
- * restore postgres backup
+ * restore a postgres backup into a container or a host database
  *
- * @param target the container or host backup target
- * @param snapshotId the snapshot id to restore
+ * @param target the container or host target to restore into
+ * @param dump the dump to read back
  * @returns void
  */
 export const restorePostgres = (
   target: PostgresTarget,
-  snapshotId: string,
+  dump: DumpToRestore,
   logger: TaskLog
 ): Effect.Effect<void, ShellCommandFailureError | UndefinedVariableError | ParsingError, ConfigTag> =>
   Effect.gen(function* _restorePostgres() {
@@ -400,7 +414,7 @@ export const restorePostgres = (
     const env = yield* configToResticEnv(config);
 
     yield* streamShellOutput({
-      cmd: sh`restic dump ${snapshotId} ${`/${target.backupName}.sql`} | ${raw(access.restore)}`,
+      cmd: sh`restic dump ${dump.snapshotId} ${dump.path} | ${raw(access.restore)}`,
       env: { ...env, ...RESTIC_PROGRESS_ENV, PGPASSWORD: access.password },
       logger,
     });
@@ -453,7 +467,7 @@ export const backupVolumes = (
       // `env` is passed through so the `-e NAME` flags above resolve from this
       // process' environment instead of spelling the credentials on the command line.
       env,
-      cmd: sh`docker run --rm --name ${helperContainerName("backup", container.backupName)} --network host ${raw(volumeArgs)} ${raw(envArgs)} restic/restic:latest backup ${raw(volumeDests)} --tag ${container.backupName} --json --host ${container.backupName}`,
+      cmd: sh`docker run --rm --name ${helperContainerName("backup", container.backupName)} --network host ${raw(volumeArgs)} ${raw(envArgs)} restic/restic:latest backup ${raw(volumeDests)} --tag ${container.backupName} --tag ${typeTag("volumes")} --json --host ${container.backupName}`,
     });
 
     return yield* parseResticBackupOutput(container.backupName, output);

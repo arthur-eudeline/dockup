@@ -177,6 +177,20 @@ export class NoSnapshotsError extends Data.TaggedError("NO_SNAPSHOTS_ERROR")<{
 }
 
 /**
+ * Raised by `restore` when nothing in the repository can be poured into the
+ * chosen destination — no dump of its type, or no snapshot holding any of its
+ * volumes. Rendered as a warning, like {@link NoSnapshotsError}.
+ */
+export class NoCompatibleBackupError extends Data.TaggedError("NO_COMPATIBLE_BACKUP_ERROR")<{
+  backupName: string;
+  type: string;
+}> {
+  override get message() {
+    return `No backup can be restored into "${this.backupName}" (${this.type}). A ${this.type} destination only takes a ${this.type === "volumes" ? "snapshot holding its own mount points" : "database dump"}.`;
+  }
+}
+
+/**
  * Raised at the end of `service remove` when the uninstall ran best-effort but
  * one or more steps failed. Every step is still attempted; this only reports
  * that the cleanup was partial.

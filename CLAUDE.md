@@ -33,7 +33,9 @@ pushed. Versions and `CHANGELOG.md` come from the conventional commits (see **Re
 - `dockup backup` — scan running containers, back up each labeled one, run retention
   cleanup, post a Discord report, and escalate any backup that has gone 3 days without a
   successful run.
-- `dockup restore` — interactive: pick a target, pick a snapshot, restore it.
+- `dockup restore` — interactive, destination first: pick the target to restore _into_, then the
+  backup to read from among those compatible with it (`src/lib/sources.ts`), then the snapshot.
+  Restoring a backup into another target is allowed and confirmed explicitly.
 - `dockup restic [args...]` — passthrough to the `restic` binary with repo/credentials env injected.
 - `dockup config init` / `dockup config check` (alias `doctor`) — manage/validate the config file.
   `config init` prompts interactively, or runs unattended (no TTY, or `-y`/`--non-interactive`) taking
@@ -111,7 +113,8 @@ or a container, would still back up — it is reported in `HostDiscovery.invalid
 `source`, and `mergeTargets` (`targets.ts`, dependency-free — no I/O, no knowledge of `HostTarget`)
 joins the two lists — a name claimed by both wins for the host target, since sharing a name means
 sharing a restic tag (interleaved snapshots, retention pruning across both). Everything downstream
-was already source-agnostic — restic is called with `--host <backupName> --tag <backupName>`, and
+was already source-agnostic — restic is called with `--host <backupName> --tag <backupName>` (plus
+the `dockup.type=` tag), and
 `health.ts` / `state.ts` are keyed by backup name — so only discovery and the dump command had to
 change. `checkHostTarget` (`config check`, `config target add`) probes a declared `HostTarget` the
 same way `backup` will use it — discovery included for `"instance"` scope — before it is trusted.
@@ -157,10 +160,35 @@ cannot cancel the whole run; callers must report `invalid` rather than drop it. 
 docker daemon aborts `backup` only when no host target is declared: host targets never go through
 docker, and the container ones simply go unseen, which the staleness rule escalates anyway.
 
+**What a restore can read from** (`src/lib/sources.ts`, pure like `targets.ts`). Since the
+destination is chosen first, the backups offered next have to be matched to it — so **every backup
+writes a second tag saying what it is**: `dockup.type=postgres|mariadb|volumes`, built by
+`typeTag()` and read back by `snapshotDeclaredType()`. That tag, rather than an index file listing
+the backups next to the repository, because it cannot drift: it is written in the same call as the
+snapshot it describes, pruned with it, and two hosts writing to one repository have no shared file
+to overwrite each other in. **Adding it forced the retention policy to group by `--host` instead of
+by tags** — grouping by tags would put a tagged snapshot in a different group from an older
+untagged one _of the same backup_, each then keeping its own 7/4/3 (measured, not assumed). Every
+backup already passes `--host <backupName>`, so the groups are otherwise identical.
+
+Snapshots taken before this fall back, in order, to the type of a discovered target still
+declaring that name (`origin: "target"` — the prompt says it is an assumption), then to what the
+snapshot looks like: one `/<name>.sql` path is a dump, anything else a file tree (`origin:
+"unknown"`). That last step cannot tell `postgres` from `mariadb`, which is exactly the gap the tag
+closes going forward; such a source is still offered rather than hidden, because a backup
+outliving its container is precisely when a restore is needed. A volumes destination is stricter:
+a volume restore writes back to the absolute paths the snapshot was taken from, so a source is
+compatible only if it holds one of the destination's own mount points. Untagged snapshots
+(something else's, in the same repository) are dropped, and `parseResticSnapshotListOutput`
+tolerates a missing `summary`/`tags` — the whole listing is read at once now, so one foreign
+snapshot must not make it unparseable. The dump path handed to the restore comes from the
+_snapshot_, never rebuilt from the destination's name: those two parted ways the moment a
+cross-restore became possible.
+
 **Backup/restore per type** (`src/lib/backup.ts`):
 
 - `mariadb` / `postgres` — a dump piped into `restic backup --stdin`; restore pipes `restic dump`
-  back into the client. Uses `--host <backupName>` and `--tag <backupName>`. Both dumps parse their
+  back into the client, reading the `DumpToRestore` it is given (snapshot + path inside it). Uses `--host <backupName>` and the two tags. Both dumps parse their
   output with `rejectEmpty`, so restic processing 0 byte fails with `EmptyBackupError` instead of
   recording an empty snapshot as a success. The two postgres sources differ only by the prefix of
   that command — `docker exec -e PGPASSWORD <id> pg_dump …` against a container, plain
@@ -174,7 +202,7 @@ docker, and the container ones simply go unseen, which the staleness rule escala
 
 **Restic wrapper** (`src/lib/restic.ts`). `configToResticEnv` maps config → restic env;
 `restic()` execs the binary and exits with its code; `resticCleanUp()` is the retention policy
-(`forget --keep-daily 7 --keep-weekly 4 --keep-monthly 3`, grouped by tag); parsers turn
+(`forget --keep-daily 7 --keep-weekly 4 --keep-monthly 3`, grouped by host — see `sources.ts`); parsers turn
 restic's `--json` output into typed structs.
 
 **Notifications** (`src/lib/discord.ts`). Backup runs aggregate `ResticStructuredOutput[]` into
