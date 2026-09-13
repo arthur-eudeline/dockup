@@ -12,7 +12,8 @@ import {
   DOCKUP_SHELL_USER,
   readConfig,
 } from "../../lib/config";
-import { ensureDockerPermissions } from "../../lib/docker";
+import { ensureDockerPermissions, listBackupEnabledContainers } from "../../lib/docker";
+import type { ContainerBackupConfig } from "../../lib/docker";
 import { ConfigTag } from "../../lib/effect";
 import { safeSpinner } from "../../lib/prompts";
 import { ensureRepoInitialized } from "../../lib/restic";
@@ -26,6 +27,10 @@ const summarizeDatabases = (databases: string[]): string =>
   databases.length <= MAX_LISTED_DATABASES
     ? databases.join(", ")
     : `${databases.slice(0, MAX_LISTED_DATABASES).join(", ")}, +${databases.length - MAX_LISTED_DATABASES} more`;
+
+/** Renders a container backed up via its `dockup.backup.*` labels. */
+const describeContainer = (container: ContainerBackupConfig): string =>
+  `${chalk.blue(container.backupName)} — ${chalk.yellow(container.type)} (container ${chalk.dim(container.id.slice(0, 12))})`;
 
 export const ConfigCheckCommand = new Command()
   .name("check")
@@ -68,11 +73,32 @@ export const ConfigCheckCommand = new Command()
           onError: (e) => chalk.red(`docker : ${e.message}`),
         });
 
+        // What runs on the docker host, discovered the same way `backup` finds it —
+        // through the `dockup.backup.*` labels, not the config file.
+        const containerDiscovery = yield* safeSpinner(listBackupEnabledContainers(), {
+          title: "discovering backed up containers...",
+          onSuccess: (d) =>
+            d.containers.length === 0
+              ? chalk.green("containers : none carry the dockup.backup.enabled label")
+              : chalk.green(`containers : ${d.containers.length} backed up via label`),
+          onError: (e) => chalk.red(`containers : could not list\n${e.message}`),
+        });
+
+        if (containerDiscovery) {
+          if (containerDiscovery.containers.length > 0) {
+            log.message(containerDiscovery.containers.map(describeContainer).join("\n"));
+          }
+
+          for (const { id, error } of containerDiscovery.invalid) {
+            log.warn(`Container ${chalk.yellow(id)} carries the label but its config is invalid : ${error.message}`);
+          }
+        }
+
         if (config) {
           yield* safeSpinner(ensureRepoInitialized().pipe(Effect.provideService(ConfigTag, config)), {
-            title: "checking restic repo...",
-            onSuccess: () => chalk.green("restic repo : configured at ") + chalk.yellow(config.RESTIC_REPOSITORY),
-            onError: (e) => chalk.red(`restic repo : error\n${e.message}`),
+            title: "checking S3 access (restic repository)...",
+            onSuccess: () => chalk.green("S3 access : granted — repository ") + chalk.yellow(config.RESTIC_REPOSITORY),
+            onError: (e) => chalk.red(`S3 access : denied or unreachable\n${e.message}`),
           });
 
           // Host targets are the one thing dockup cannot discover for itself, so
