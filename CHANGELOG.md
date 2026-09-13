@@ -1,3 +1,11 @@
+## dockup@0.5.0
+
+### Features
+
+- Backup all database (86ea48a)
+- Support clickhouse (7e0ea8a)
+- Improve dockup doctor (61a9502)
+
 ## dockup@0.4.0
 
 ### Features
