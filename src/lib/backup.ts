@@ -14,7 +14,7 @@ import { ConfigTag } from "./effect";
 import type { EmptyBackupError, ParsingError } from "./errors";
 import { ShellCommandFailureError, UndefinedVariableError } from "./errors";
 import { registerSecret } from "./redact";
-import { configToResticEnv, parseResticBackupOutput } from "./restic";
+import { configToResticEnv, parseResticBackupOutput, RESTIC_PROGRESS_ENV } from "./restic";
 import type { ResticSuccessfulBackupStructuredOutput } from "./restic";
 import type { HostBackupTarget, PostgresTarget, ResolvedHostConnection } from "./targets";
 import type { TaskLog } from "./types";
@@ -111,7 +111,7 @@ export const restoreMariaDB = (
       // The dump was taken with `--databases`, so it carries its own CREATE/USE:
       // no target database is passed here.
       cmd: sh`restic dump ${snapshotId} ${`/${container.backupName}.sql`} | docker exec -i -e MYSQL_PWD ${container.id} mariadb -u ${mdb.user}`,
-      env: { ...env, MYSQL_PWD: mdb.password },
+      env: { ...env, ...RESTIC_PROGRESS_ENV, MYSQL_PWD: mdb.password },
       logger,
     });
   });
@@ -401,10 +401,20 @@ export const restorePostgres = (
 
     yield* streamShellOutput({
       cmd: sh`restic dump ${snapshotId} ${`/${target.backupName}.sql`} | ${raw(access.restore)}`,
-      env: { ...env, PGPASSWORD: access.password },
+      env: { ...env, ...RESTIC_PROGRESS_ENV, PGPASSWORD: access.password },
       logger,
     });
   });
+
+/**
+ * Forwards the progress setting into the helper container — same `-e NAME`
+ * inherit-from-the-client form as the credentials.
+ */
+const PROGRESS_ENV_ARGS = raw(
+  Object.keys(RESTIC_PROGRESS_ENV)
+    .map((name) => `-e ${name}`)
+    .join(" ")
+);
 
 /**
  * Names the throwaway `restic/restic` container.
@@ -493,8 +503,10 @@ export const restoreVolumes = (
 
       yield* streamShellOutput({
         logger,
-        env,
-        cmd: sh`docker run --rm --name ${helperContainerName("restore", container.backupName)} --network host ${raw(volumeArgs)} ${raw(envArgs)} restic/restic:latest restore ${snapshotId} --target / ${raw(includeArgs)} --json`,
+        env: { ...env, ...RESTIC_PROGRESS_ENV },
+        // `--verbose` rather than `--json`: nothing parses this output, it is
+        // only read by whoever is watching the restore run.
+        cmd: sh`docker run --rm --name ${helperContainerName("restore", container.backupName)} --network host ${raw(volumeArgs)} ${raw(envArgs)} ${PROGRESS_ENV_ARGS} restic/restic:latest restore ${snapshotId} --target / ${raw(includeArgs)} --verbose`,
       });
     });
 

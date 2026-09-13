@@ -1,4 +1,4 @@
-import { intro, log, outro, taskLog } from "@clack/prompts";
+import { intro, log, outro } from "@clack/prompts";
 import chalk from "chalk";
 import { Command } from "commander";
 import { Effect } from "effect";
@@ -9,7 +9,7 @@ import type { ContainerDiscovery } from "../lib/docker";
 import { ensureDockerPermissions, listBackupEnabledContainers } from "../lib/docker";
 import { ConfigTag } from "../lib/effect";
 import { NoSnapshotsError } from "../lib/errors";
-import { promptSelectSnapshot, promptSelectTarget } from "../lib/prompts";
+import { promptSelectSnapshot, promptSelectTarget, streamingTaskLog } from "../lib/prompts";
 import { listSnapshots } from "../lib/restic";
 import { mergeTargets } from "../lib/targets";
 import type { TaskLog } from "../lib/types";
@@ -84,10 +84,9 @@ export const RestoreCommand = new Command()
 
         const snapshot = yield* promptSelectSnapshot(snapshots);
 
-        const logger: TaskLog = taskLog({
-          title: `Restoring ${chalk.blue(target.backupName)} from snapshot ${chalk.yellow(snapshot.id)} (${snapshot.relativeDate})`,
-          spacing: 0,
-        });
+        const logger: TaskLog = streamingTaskLog(
+          `Restoring ${chalk.blue(target.backupName)} from snapshot ${chalk.yellow(snapshot.id)} (${snapshot.relativeDate})`
+        );
 
         const restore = Effect.gen(function* _doRestore() {
           switch (target.type) {

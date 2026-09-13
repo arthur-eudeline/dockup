@@ -120,6 +120,14 @@ which reports only the last command of a pipeline and so let a failed dump produ
 template: it quotes every interpolated value, and everything dockup interpolates (container ids,
 DB users, volume paths) comes from `docker inspect` / `docker exec env`. A fragment the code
 itself assembled — a list of `-v`/`-e` flags — opts out with `raw()`; never a value from outside.
+`streamShellOutput` spawns that bash itself rather than through Bun's `$`, because `$` exposes
+stdout only: restic and the database clients print their progress, their notices and the fatal
+error explaining a failure on **stderr**, so a restore used to run in silence and fail with
+nothing but an exit code. Both streams are drained concurrently and streamed to the caller's
+`TaskLog` live; only stdout is returned, since that is what the restic parsers read, and the last
+stderr lines are quoted back in the `ShellCommandFailureError`. Restic reports progress at all
+only because the restore paths set `RESTIC_PROGRESS_ENV` (`src/lib/restic.ts`) — it stays silent
+when it cannot redraw a terminal, which it never can here.
 
 **Secrets never reach the outside (`src/lib/redact.ts`).** Credentials are passed to child
 processes through the environment, never on a command line: `docker run -e NAME` / `docker exec

@@ -1,4 +1,4 @@
-import { intro, log, outro, spinner, taskLog } from "@clack/prompts";
+import { intro, log, outro, spinner } from "@clack/prompts";
 import chalk from "chalk";
 import { Command } from "commander";
 import { Effect, Ref } from "effect";
@@ -12,6 +12,7 @@ import { ensureDockerPermissions, listBackupEnabledContainers } from "../lib/doc
 import type { AnyTaggedError } from "../lib/effect";
 import { ConfigTag } from "../lib/effect";
 import { applyRun, outcomesFromReport, preflightOutcomes } from "../lib/health";
+import { streamingTaskLog } from "../lib/prompts";
 import { ensureRepoInitialized, resticCleanUp } from "../lib/restic";
 import type { ResticStructuredOutput } from "../lib/restic";
 import { emptyState, knownBackupNames, readState, STATE_PATH, writeState } from "../lib/state";
@@ -269,10 +270,7 @@ export const BackupCommand = new Command()
         }
 
         for (const target of targets) {
-          const task: TaskLog = taskLog({
-            title: `Backuping ${describeTarget(target)}`,
-            spacing: 0,
-          });
+          const task: TaskLog = streamingTaskLog(`Backuping ${describeTarget(target)}`);
           yield* backupOne(report, target, task);
         }
 

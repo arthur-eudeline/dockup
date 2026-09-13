@@ -1,5 +1,5 @@
 // oxlint-disable promise/prefer-await-to-then
-import { isCancel, log, S_SUCCESS, select, spinner } from "@clack/prompts";
+import { isCancel, log, S_SUCCESS, select, spinner, taskLog } from "@clack/prompts";
 import type { SelectOptions } from "@clack/prompts";
 import chalk from "chalk";
 import { Effect } from "effect";
@@ -8,6 +8,21 @@ import type { AnyTaggedError } from "./effect";
 import { PromptCancelledError } from "./errors";
 import type { ResticSnapshotItemStructredOutput } from "./restic";
 import type { BackupTarget } from "./targets";
+import type { TaskLog } from "./types";
+
+/** How many lines of a running command stay on screen. */
+const TASK_LOG_LINES = 10;
+
+/**
+ * The task log a command streaming a child process' output writes to.
+ *
+ * `limit` is not cosmetic : without it clack keeps every line it was ever handed
+ * and redraws the whole block on each new one, so a restore reporting its
+ * progress once a second would get slower and slower and push everything else
+ * off the screen. A ten line window is enough to watch a command work — and what
+ * matters on a failure is quoted back in the error anyway.
+ */
+export const streamingTaskLog = (title: string): TaskLog => taskLog({ limit: TASK_LOG_LINES, spacing: 0, title });
 
 /**
  * Run any `@clack/prompts` prompt as an Effect: a user cancel (Ctrl-C / Esc)

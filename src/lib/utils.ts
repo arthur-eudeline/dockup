@@ -90,28 +90,109 @@ interface StreamShellOutputArgs {
   onSuccess?: () => void;
 }
 
+/** How many trailing stderr lines a failure quotes back in its message. */
+const ERROR_CONTEXT_LINES = 10;
+
+/**
+ * Splits a byte stream into lines *as they arrive*.
+ *
+ * `\r` ends a line just like `\n` does: restic redraws its progress counter with
+ * a carriage return, so splitting on newlines alone turns a whole restore into a
+ * single line that only shows up once it is over.
+ *
+ * @yields Each complete line, without its terminator.
+ */
+const readLines = async function* _readLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const decoder = new TextDecoder();
+  let pending = "";
+
+  for await (const chunk of stream) {
+    pending += decoder.decode(chunk, { stream: true });
+    const lines = pending.split(/\r\n|[\r\n]/);
+    // The last piece has no terminator yet — it is the start of the next line.
+    pending = lines.pop() ?? "";
+
+    for (const line of lines) {
+      yield line;
+    }
+  }
+
+  pending += decoder.decode();
+  if (pending.length > 0) {
+    yield pending;
+  }
+};
+
+/**
+ * Runs a command and streams every line it prints to `logger`, live.
+ *
+ * Both streams are read, and read *concurrently* — a child whose stderr pipe
+ * fills up while nobody drains it blocks forever. They are kept apart on the way
+ * out though: only stdout is returned, because callers parse that (restic's
+ * `--json` summary is looked up as the last line), while restic and the database
+ * clients say everything else — progress counters, notices, the fatal error that
+ * explains a failed restore — on stderr. Bun's shell drops stderr entirely, which
+ * is why a restore used to run in complete silence and fail with nothing but an
+ * exit code.
+ */
 export const streamShellOutput = (args: StreamShellOutputArgs): Effect.Effect<string, ShellCommandFailureError> =>
   Effect.gen(function* _streamShellOutput() {
     const output: string[] = [];
-    yield* Effect.tryPromise({
-      try: async () => {
-        for await (const line of bash(args.cmd).env(childEnv(args.env)).lines()) {
-          const safe = redact(line);
-          output.push(safe);
-          args.logger?.message(safe);
+    const errors: string[] = [];
+
+    const spawn = Effect.sync(() =>
+      Bun.spawn(["bash", "-o", "pipefail", "-c", args.cmd], {
+        env: childEnv(args.env),
+        stderr: "pipe",
+        // Same as Bun's shell: nothing on the outside feeds these commands, and a
+        // child left waiting on a terminal would hang an unattended run.
+        stdin: "ignore",
+        stdout: "pipe",
+      })
+    );
+
+    const drain = (child: Bun.Subprocess<"ignore", "pipe", "pipe">) =>
+      Effect.tryPromise({
+        try: async () => {
+          const pump = async (stream: ReadableStream<Uint8Array>, collected: string[]) => {
+            for await (const line of readLines(stream)) {
+              const safe = redact(line);
+              collected.push(safe);
+              args.logger?.message(safe);
+            }
+          };
+
+          await Promise.all([pump(child.stdout, output), pump(child.stderr, errors)]);
+
+          const exitCode = await child.exited;
+          if (exitCode !== 0) {
+            throw new Error(`exited with code ${exitCode}`);
+          }
+        },
+        catch: (e) => {
+          args.onError?.(e);
+          const context = errors.slice(-ERROR_CONTEXT_LINES).join("\n");
+
+          return new ShellCommandFailureError({
+            cause: e,
+            message: redact(`The command ${args.cmd} failed${context.length > 0 ? `:\n${context}` : ""}`),
+          });
+        },
+      });
+
+    // Interruption kills the shell instead of leaving it running with nobody
+    // reading it. A Ctrl-C reaches the whole process group anyway — this covers
+    // an interruption that comes from the code, and closes the pipes either way.
+    yield* Effect.acquireUseRelease(spawn, drain, (child) =>
+      Effect.sync(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill();
         }
-      },
-      catch: (e) => {
-        args.onError?.(e);
-        return new ShellCommandFailureError({
-          cause: e,
-          message: redact(`The command ${args.cmd} failed`),
-        });
-      },
-    });
+      })
+    );
 
     args.onSuccess?.();
-    return yield* Effect.succeed(output.join("\n"));
+    return output.join("\n");
   });
 
 /** Where `upload.sh` and `dockup upgrade` install the compiled binary. */

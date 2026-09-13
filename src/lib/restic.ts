@@ -38,6 +38,16 @@ export const configToResticEnv = (config: Config): Effect.Effect<ResticConf> =>
   });
 
 /**
+ * Turns restic's progress counter back on.
+ *
+ * Restic reports progress only when it can redraw a terminal — and dockup always
+ * captures its output, so it never can, leaving a long restore completely silent
+ * until it is over. `RESTIC_PROGRESS_FPS` overrides that check; one status line
+ * per second is enough to follow a restore without drowning the log.
+ */
+export const RESTIC_PROGRESS_ENV = { RESTIC_PROGRESS_FPS: "1" } as const;
+
+/**
  * Executes a restic command with the dockup credentials injected as env vars,
  * streaming its stdio, and resolves to restic's own exit code. The caller
  * mirrors that code onto the process (see `restic.cmd.ts`); a failure to even
