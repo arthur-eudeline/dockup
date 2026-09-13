@@ -38,9 +38,9 @@ export class ConfigurationRetrievalError extends Data.TaggedError("CONFIGURATION
 }> {
   override get message() {
     if (this.cause === "FILE_NOT_FOUND")
-      return `Cannot retrieve the dockup configuration file at ${this.configPath}. Please set it up via the command "dockup config set"`;
+      return `Cannot retrieve the dockup configuration file at ${this.configPath}. Please set it up via the command "dockup config init"`;
 
-    return `Cannot decrypt the dockup configuration file stored at ${this.configPath}. Please re-generate one via the commande "dockup config set"`;
+    return `Cannot decrypt the dockup configuration file stored at ${this.configPath}. Please re-generate one via the commande "dockup config init"`;
   }
 }
 

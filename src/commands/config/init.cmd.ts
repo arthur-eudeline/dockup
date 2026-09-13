@@ -67,7 +67,7 @@ const PROMPTS: Record<Field, () => Promise<string | symbol>> = {
   AWS_SECRET_ACCESS_KEY: () => password({ message: "S3 Secret key", validate: validateField("AWS_SECRET_ACCESS_KEY") }),
   RESTIC_REPOSITORY: () =>
     text({
-      message: "S3 URL",
+      message: "S3 URL (s3:https://host:port/bucket)",
       placeholder: "s3:https://host:port/bucket",
       validate: validateField("RESTIC_REPOSITORY"),
     }),
