@@ -3,7 +3,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import { Effect, Ref } from "effect";
 
-import { backupMariaDB, backupPostgres, backupVolumes, resolveHostTargets } from "../lib/backup";
+import { backupClickhouse, backupMariaDB, backupPostgres, backupVolumes, resolveHostTargets } from "../lib/backup";
 import { runCommand } from "../lib/cli";
 import { deliverDiscordMessages, formatDiscordReport } from "../lib/discord";
 import type { DiscordMessage } from "../lib/discord";
@@ -44,6 +44,9 @@ const backupOne = (report: Report, target: BackupTarget, task: TaskLog): Effect.
         }
         case "postgres": {
           return yield* backupPostgres(target, task);
+        }
+        case "clickhouse": {
+          return yield* backupClickhouse(target, task);
         }
         case "volumes": {
           return yield* backupVolumes(target, task);

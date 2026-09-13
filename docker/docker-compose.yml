@@ -16,6 +16,7 @@ services:
       - RUSTFS_SECRET_KEY=rustfsadmin
       - RUSTFS_OBS_LOGGER_LEVEL=info
       - RUSTFS_TLS_PATH=/opt/tls
+      - RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true
     restart: unless-stopped
     healthcheck:
       test:
@@ -85,6 +86,27 @@ services:
       MARIADB_USER: ${DB_USER?:error}
       MYSQL_PASSWORD_FILE: /run/secrets/DB_PASSWORD
       MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    secrets:
+      - DB_PASSWORD
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    volumes:
+      - ./seeds/clickhouse/small.sql:/docker-entrypoint-initdb.d/small.sql:ro
+    ports:
+      - 8123:8123
+    labels:
+      - "dockup.backup.enabled=true"
+      - "dockup.backup.type=clickhouse"
+      - "dockup.backup.name=clickhouse-backup"
+    environment:
+      CLICKHOUSE_USER: ${DB_USER?:error}
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/DB_PASSWORD
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     secrets:
       - DB_PASSWORD
 

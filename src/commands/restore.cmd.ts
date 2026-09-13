@@ -3,7 +3,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import { Effect } from "effect";
 
-import { restoreMariaDB, restorePostgres, restoreVolumes, resolveHostTargets } from "../lib/backup";
+import { restoreClickhouse, restoreMariaDB, restorePostgres, restoreVolumes, resolveHostTargets } from "../lib/backup";
 import { runCommand } from "../lib/cli";
 import type { ContainerDiscovery } from "../lib/docker";
 import { ensureDockerPermissions, getContainerVolumes, listBackupEnabledContainers } from "../lib/docker";
@@ -134,6 +134,9 @@ export const RestoreCommand = new Command()
             }
             case "mariadb": {
               return yield* restoreMariaDB(target, dump, logger);
+            }
+            case "clickhouse": {
+              return yield* restoreClickhouse(target, dump, logger);
             }
             case "volumes": {
               return yield* restoreVolumes(target, snapshot.id, logger);

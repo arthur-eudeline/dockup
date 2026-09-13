@@ -39,11 +39,25 @@ export type BackupTarget = ContainerBackupConfig | HostBackupTarget;
 /** What dockup knows how to back up — and what a snapshot's `dockup.type=` tag names. */
 export type BackupType = BackupTarget["type"];
 
-/** The same, as values : what a tag read back off a snapshot is checked against. */
-export const BACKUP_TYPES = ["mariadb", "postgres", "volumes"] as const satisfies readonly BackupType[];
+/**
+ * The same, as values : what a tag read back off a snapshot is checked against.
+ *
+ * Keep it in step with the union above — `satisfies` rejects an entry that is not
+ * a `BackupType`, but says nothing about a *missing* one, and a type absent from
+ * here makes `snapshotDeclaredType` read its own tag back as `null`.
+ */
+export const BACKUP_TYPES = ["mariadb", "postgres", "clickhouse", "volumes"] as const satisfies readonly BackupType[];
 
 /** The targets `backupPostgres` / `restorePostgres` know how to handle. */
 export type PostgresTarget = Extract<BackupTarget, { type: "postgres" }>;
+
+/**
+ * The targets `backupClickhouse` / `restoreClickhouse` know how to handle.
+ *
+ * Containers only, for now : ClickHouse is reached by exec-ing its own
+ * `clickhouse-client`, and a `HostTarget` is postgres by construction.
+ */
+export type ClickhouseTarget = Extract<BackupTarget, { type: "clickhouse" }>;
 
 export interface MergedTargets {
   targets: BackupTarget[];

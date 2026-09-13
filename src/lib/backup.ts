@@ -11,13 +11,13 @@ import {
 } from "./docker";
 import type { ContainerBackupConfig } from "./docker";
 import { ConfigTag } from "./effect";
-import type { EmptyBackupError, ParsingError } from "./errors";
-import { ShellCommandFailureError, UndefinedVariableError } from "./errors";
+import type { EmptyBackupError } from "./errors";
+import { ParsingError, ShellCommandFailureError, UndefinedVariableError } from "./errors";
 import { registerSecret } from "./redact";
 import { configToResticEnv, parseResticBackupOutput, RESTIC_PROGRESS_ENV } from "./restic";
 import type { ResticSuccessfulBackupStructuredOutput } from "./restic";
 import { typeTag } from "./sources";
-import type { HostBackupTarget, PostgresTarget, ResolvedHostConnection } from "./targets";
+import type { ClickhouseTarget, HostBackupTarget, PostgresTarget, ResolvedHostConnection } from "./targets";
 import type { TaskLog } from "./types";
 import { getShellOutput, raw, sh, shellQuote, streamShellOutput } from "./utils";
 
@@ -416,6 +416,309 @@ export const restorePostgres = (
     yield* streamShellOutput({
       cmd: sh`restic dump ${dump.snapshotId} ${dump.path} | ${raw(access.restore)}`,
       env: { ...env, ...RESTIC_PROGRESS_ENV, PGPASSWORD: access.password },
+      logger,
+    });
+  });
+
+/**
+ * Gets the credentials a ClickHouse container was started with.
+ *
+ * Unlike postgres and mariadb, a missing password is *not* an error here: the
+ * official image starts with a `default` user that has none, and refusing to back
+ * that up would rule out the most common setup there is.
+ */
+const getClickhouseEnvVariables = (containerId: string) =>
+  Effect.gen(function* _getClickhouseEnvVariables() {
+    const vars = yield* getContainerEnvVariables(containerId);
+
+    // The image only sets CLICKHOUSE_USER when it is asked to create one; the
+    // server answers as `default` otherwise.
+    const user = yield* getContainerEnvVariable(containerId, vars, "CLICKHOUSE_USER").pipe(
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => Effect.succeed("default"))
+    );
+
+    // Only a *missing* variable falls back to the plain password: a failure to
+    // read the secret file must surface, not be mistaken for "no secret file".
+    const passwordFile = yield* getContainerEnvVariable(containerId, vars, "CLICKHOUSE_PASSWORD_FILE", true).pipe(
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => Effect.succeed(null))
+    );
+    const password = yield* getContainerEnvVariable(containerId, vars, "CLICKHOUSE_PASSWORD").pipe(
+      Effect.catchTag("UNDEFINED_VARIABLE_ERROR", () => Effect.succeed(null))
+    );
+
+    const resolved = passwordFile ?? password ?? "";
+    yield* Effect.sync(() => registerSecret(resolved));
+
+    return { password: resolved, user };
+  });
+
+/** The credentials `clickhouse-client` reads out of its environment. */
+const clickhouseEnv = (credentials: { password: string; user: string }) => ({
+  CLICKHOUSE_PASSWORD: credentials.password,
+  CLICKHOUSE_USER: credentials.user,
+});
+
+/**
+ * How dockup reaches a container's own `clickhouse-client`.
+ *
+ * Both the user *and* the password travel through the environment rather than
+ * `--user`/`--password`: they stay out of the process table, and it sidesteps the
+ * precedence between the two, which ClickHouse has changed across versions. The
+ * `-e NAME` form with no `=` makes docker inherit the value from dockup's own
+ * environment, so every caller must pass {@link clickhouseEnv} alongside.
+ */
+const clickhouseExec = (container: ClickhouseTarget): string =>
+  sh`docker exec -e CLICKHOUSE_USER -e CLICKHOUSE_PASSWORD ${container.id} clickhouse-client`;
+
+/** The same, with stdin attached so a dump can be piped back in. */
+const clickhouseExecInteractive = (container: ClickhouseTarget): string =>
+  sh`docker exec -i -e CLICKHOUSE_USER -e CLICKHOUSE_PASSWORD ${container.id} clickhouse-client`;
+
+/** Backtick-quotes a ClickHouse identifier, the way the server writes them back. */
+const chIdent = (name: string): string => `\`${name.replaceAll("\\", "\\\\").replaceAll("`", "\\`")}\``;
+
+/** ClickHouse's own databases — never dumped, and never restorable anyway. */
+const CH_SYSTEM_DATABASES = `'system', 'INFORMATION_SCHEMA', 'information_schema'`;
+
+/**
+ * Database engines that proxy another server. Their tables are a view onto data
+ * dockup does not own and could not restore: dumping them would pull a full copy
+ * of someone else's MySQL into the snapshot.
+ */
+const CH_FOREIGN_DATABASE_ENGINES = `'MySQL', 'PostgreSQL', 'MaterializedMySQL', 'MaterializedPostgreSQL', 'SQLite'`;
+
+/**
+ * Table engines that hold no data of their own — a view, a proxy onto another
+ * table, or a stream. Their DDL is dumped, their contents are not: `select *`
+ * would either re-read data already dumped elsewhere or consume a queue.
+ */
+const CH_DATALESS_TABLE_ENGINES = `'Distributed', 'Dictionary', 'Merge', 'Null', 'Kafka', 'RabbitMQ', 'NATS', 'MySQL', 'PostgreSQL', 'SQLite', 'MongoDB', 'Redis', 'URL', 'S3', 'File', 'HDFS'`;
+
+/** The databases whose schema dockup dumps — the user's own, on this server. */
+const CH_OWNED_DATABASES = `select name from system.databases where name not in (${CH_SYSTEM_DATABASES}) and engine not in (${CH_FOREIGN_DATABASE_ENGINES})`;
+
+/**
+ * Tables worth dumping at all.
+ *
+ * `.inner%` are the storage a materialized view creates for itself: they are
+ * recreated by the view's own DDL, and dumping them would restore twice.
+ */
+const CH_DUMPABLE_TABLES = `database in (${CH_OWNED_DATABASES}) and not is_temporary and name not like '.inner%'`;
+
+const DISCOVER_CH_DATABASES_QUERY = `${CH_OWNED_DATABASES} order by name`;
+
+/**
+ * Every object the dump recreates, and whether its *contents* come with it.
+ *
+ * One query rather than two: the schema needs all of them (each gets a `DROP`),
+ * while only the ones holding data of their own get a `select`.
+ */
+const DISCOVER_CH_TABLES_QUERY = `select database, name, engine not like '%View' and engine not in (${CH_DATALESS_TABLE_ENGINES}) from system.tables where ${CH_DUMPABLE_TABLES} order by database, name`;
+
+/**
+ * Every `CREATE` statement of the server, in one query.
+ *
+ * `create_table_query` is a column of `system.tables`, so the whole schema comes
+ * back in a single round trip rather than one `SHOW CREATE TABLE` per table — and
+ * it never touches a command line on the way. Views sort last (`engine like
+ * '%View'` is 0 then 1), so the tables they read already exist when they are
+ * created.
+ */
+const DUMP_CH_SCHEMA_QUERY = `select concat(create_table_query, ';') from system.tables where ${CH_DUMPABLE_TABLES} order by engine like '%View', database, name`;
+
+/**
+ * Rows of 1000 rather than the 65 000 ClickHouse defaults to.
+ *
+ * `SQLInsert` writes one `INSERT` statement per batch, and a default-sized batch
+ * of anything but the narrowest table blows straight past `max_query_size`
+ * (256 KiB) — the dump would be written happily and refused on the way back in.
+ */
+const CH_SQL_INSERT_BATCH_SIZE = 1000;
+
+/**
+ * How large a single statement the restore accepts, well above what the batch
+ * size above can produce. A safety net for a dump written by an older dockup, or
+ * a table whose individual rows are very wide.
+ */
+const CH_MAX_QUERY_SIZE = 268_435_456;
+
+interface ClickhouseTableRef {
+  database: string;
+  name: string;
+}
+
+/** Splits a TabSeparated result into rows of exactly `columns` fields. */
+const parseClickhouseRows = (output: string, columns: number, query: string): Effect.Effect<string[][], ParsingError> =>
+  Effect.try({
+    try: () =>
+      output
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => {
+          const fields = line.split("\t");
+          if (fields.length !== columns) {
+            throw new Error(`expected ${columns} column(s), got ${fields.length} in "${line}"`);
+          }
+          return fields;
+        }),
+    catch: (e) =>
+      new ParsingError({
+        cause: e,
+        message: `The ClickHouse output of \`${query}\` could not be read.`,
+      }),
+  });
+
+interface ClickhouseSchema {
+  databases: string[];
+  /** Everything the dump recreates, views included — one `DROP` each. */
+  objects: ClickhouseTableRef[];
+  /** The subset holding data of its own — one `select` each. */
+  tables: ClickhouseTableRef[];
+}
+
+/**
+ * Asks the server what it holds.
+ *
+ * A ClickHouse container is backed up whole — every database it owns — because
+ * unlike postgres it has no single `CLICKHOUSE_DB` the deployment agrees on, and
+ * a server with several databases is the norm rather than the exception.
+ */
+const discoverClickhouseSchema = (
+  container: ClickhouseTarget,
+  credentials: { password: string; user: string }
+): Effect.Effect<ClickhouseSchema, ShellCommandFailureError | ParsingError> =>
+  Effect.gen(function* _discoverClickhouseSchema() {
+    const exec = clickhouseExec(container);
+    const env = clickhouseEnv(credentials);
+
+    const databasesOutput = yield* getShellOutput(
+      sh`${raw(exec)} --format TabSeparated --query ${DISCOVER_CH_DATABASES_QUERY}`,
+      { env }
+    );
+    const databases = yield* parseClickhouseRows(databasesOutput, 1, "system.databases");
+
+    const tablesOutput = yield* getShellOutput(
+      sh`${raw(exec)} --format TabSeparated --query ${DISCOVER_CH_TABLES_QUERY}`,
+      { env }
+    );
+    const rows = yield* parseClickhouseRows(tablesOutput, 3, "system.tables");
+    const objects = rows.map(([database, name, withData]) => ({
+      database: database ?? "",
+      name: name ?? "",
+      withData: withData === "1",
+    }));
+
+    return {
+      databases: databases.map(([name]) => name ?? ""),
+      objects: objects.map(({ database, name }) => ({ database, name })),
+      tables: objects.filter((o) => o.withData).map(({ database, name }) => ({ database, name })),
+    };
+  });
+
+/**
+ * Builds the SQL stream a ClickHouse backup pipes into restic.
+ *
+ * ClickHouse ships no `pg_dump`: its own `BACKUP … TO Disk(…)` needs the server
+ * configured with an allow-listed destination, which a tool driven entirely by
+ * labels cannot assume. So the dump is assembled here, in three sections —
+ * every `CREATE DATABASE` and `DROP TABLE`, then the whole schema, then the data
+ * table by table.
+ *
+ * The parts are chained with `&&`, never `;`. A `{ a ; b ; }` group reports the
+ * status of its *last* command, so a `docker exec` failing halfway would hand
+ * restic a truncated stream and record it as a successful snapshot — the very
+ * bug `bash -o pipefail` was introduced to kill.
+ */
+const clickhouseDumpCommand = (container: ClickhouseTarget, schema: ClickhouseSchema): string => {
+  const exec = clickhouseExec(container);
+
+  // Drops come before every create rather than next to their own table: the
+  // schema arrives as one opaque block from the server, and a restore only needs
+  // the two to be globally ordered. `DROP TABLE` covers views too — and it has to
+  // reach them, or `CREATE VIEW` fails on a destination that still holds one.
+  const prelude = [
+    ...schema.databases.map((database) => `CREATE DATABASE IF NOT EXISTS ${chIdent(database)};`),
+    ...schema.objects.map((object) => `DROP TABLE IF EXISTS ${chIdent(object.database)}.${chIdent(object.name)};`),
+  ].join("\n");
+
+  const parts = [
+    sh`printf '%s\n' ${prelude}`,
+    // TSVRaw, so the multi-line CREATE statements come out as written rather than
+    // with their newlines escaped.
+    sh`${raw(exec)} --format TSVRaw --query ${DUMP_CH_SCHEMA_QUERY}`,
+  ];
+
+  for (const table of schema.tables) {
+    // `SQLInsert` writes an *unqualified* table name, so each table's data is
+    // preceded by the database to pour it into. That is also why the table name
+    // setting can keep its default backtick quoting: a `database.table` string
+    // would come back quoted as one identifier, and a column named `order` needs
+    // that quoting to survive the round trip.
+    parts.push(sh`printf '%s\n' ${`USE ${chIdent(table.database)};`}`);
+    parts.push(
+      sh`${raw(exec)} --output_format_sql_insert_table_name ${table.name} --output_format_sql_insert_max_batch_size ${String(CH_SQL_INSERT_BATCH_SIZE)} --query ${`SELECT * FROM ${chIdent(table.database)}.${chIdent(table.name)} FORMAT SQLInsert`}`
+    );
+  }
+
+  return `{ ${parts.join(" && ")}; }`;
+};
+
+/**
+ * Backups every database of a ClickHouse server as one SQL dump.
+ *
+ * @param target The ClickHouse container to dump
+ * @returns The command structured output
+ */
+export const backupClickhouse = (
+  target: ClickhouseTarget,
+  logger: TaskLog
+): Effect.Effect<
+  ResticSuccessfulBackupStructuredOutput,
+  ShellCommandFailureError | UndefinedVariableError | ParsingError | EmptyBackupError,
+  ConfigTag
+> =>
+  Effect.gen(function* _backupClickhouse() {
+    const credentials = yield* getClickhouseEnvVariables(target.id);
+    const schema = yield* discoverClickhouseSchema(target, credentials);
+    const config = yield* ConfigTag;
+    const env = yield* configToResticEnv(config);
+
+    const output = yield* streamShellOutput({
+      cmd: sh`${raw(clickhouseDumpCommand(target, schema))} | restic backup --stdin --stdin-filename ${`${target.backupName}.sql`} --tag ${target.backupName} --tag ${typeTag("clickhouse")} --skip-if-unchanged --json --host ${target.backupName}`,
+      env: { ...env, ...clickhouseEnv(credentials) },
+      logger,
+    });
+
+    return yield* parseResticBackupOutput(target.backupName, output, { rejectEmpty: true });
+  });
+
+/**
+ * restore a clickhouse backup into a container
+ *
+ * The dump carries its own `CREATE DATABASE`/`USE`, so — unlike postgres — it can
+ * only ever be restored into the databases it was taken from.
+ *
+ * @param target the container to restore into
+ * @param dump the dump to read back
+ * @returns void
+ */
+export const restoreClickhouse = (
+  target: ClickhouseTarget,
+  dump: DumpToRestore,
+  logger: TaskLog
+): Effect.Effect<void, ShellCommandFailureError | UndefinedVariableError | ParsingError, ConfigTag> =>
+  Effect.gen(function* _restoreClickhouse() {
+    const credentials = yield* getClickhouseEnvVariables(target.id);
+    const config = yield* ConfigTag;
+    const env = yield* configToResticEnv(config);
+
+    yield* streamShellOutput({
+      // `--multiquery` reads the whole dump as a sequence of statements in one
+      // session — which is what makes the `USE` lines apply to the inserts that
+      // follow them. It stops at the first error and exits non-zero, so there is
+      // no `ON_ERROR_STOP` equivalent to pass.
+      cmd: sh`restic dump ${dump.snapshotId} ${dump.path} | ${raw(clickhouseExecInteractive(target))} --multiquery --max_query_size ${String(CH_MAX_QUERY_SIZE)}`,
+      env: { ...env, ...RESTIC_PROGRESS_ENV, ...clickhouseEnv(credentials) },
       logger,
     });
   });

@@ -14,6 +14,8 @@ S3-compatible bucket.
 - 🔍 **Auto-discovery** — containers opt in with docker labels; nothing else to declare.
 - 🐬 **MariaDB / MySQL** and 🐘 **PostgreSQL** — a native dump (`mariadb-dump` / `pg_dump`) piped
   straight into Restic, credentials read from the container's own environment.
+- ⚡ **ClickHouse** — every database on the server dumped as one portable SQL stream,
+  schema and data, assembled from `system.tables` (ClickHouse ships no `pg_dump`).
 - 🐘 **PostgreSQL on the host** — no container to label? Declare it once in the config, one database
   or the whole instance.
 - 📦 **Docker volumes** — back up everything a container mounts, bind mounts and named volumes alike.
@@ -42,6 +44,8 @@ check the download against.
 `PATH`. Volume backups use `docker run --network host`, so they need a real Docker Engine — this
 does not work under Docker Desktop. Restoring/backing up a database running directly on the host
 (not in a container) additionally needs `pg_dump`/`psql` — see "Databases outside docker" below.
+MariaDB and ClickHouse add nothing: their client binaries are the container's own, reached with
+`docker exec`.
 
 ## 🚀 Quick start
 
@@ -83,7 +87,7 @@ nothing needed anywhere else:
 | ----------------------- | :------: | --------------------------------------------------------------------------------------------------------------------------- |
 | `dockup.backup.enabled` |   yes    | `true` to opt the container in.                                                                                             |
 | `dockup.backup.name`    |   yes    | Snapshot host/tag. Keep it stable — it's how Restic groups snapshots and how dockup tracks the backup's health across runs. |
-| `dockup.backup.type`    |   yes    | `mariadb`, `postgres`, or `volumes`.                                                                                        |
+| `dockup.backup.type`    |   yes    | `mariadb`, `postgres`, `clickhouse`, or `volumes`.                                                                          |
 
 ### MariaDB / MySQL
 
@@ -121,6 +125,42 @@ postgres:
 
 Same idea: `POSTGRES_USER` / `POSTGRES_DB` / `POSTGRES_PASSWORD` (or `POSTGRES_PASSWORD_FILE`) are
 read from the container itself.
+
+### ClickHouse
+
+```yaml
+clickhouse:
+  image: clickhouse/clickhouse-server:latest
+  labels:
+    - "dockup.backup.enabled=true"
+    - "dockup.backup.type=clickhouse"
+    - "dockup.backup.name=my-app-clickhouse"
+  environment:
+    CLICKHOUSE_USER: my_app # optional, defaults to `default`
+    CLICKHOUSE_PASSWORD_FILE: /run/secrets/db_password # or CLICKHOUSE_PASSWORD
+```
+
+ClickHouse has no `pg_dump`, and its own `BACKUP … TO Disk(…)` needs the server configured with an
+allow-listed destination — which a tool driven purely by labels cannot assume. So dockup assembles
+the dump itself: every `CREATE DATABASE`, the whole schema read out of `system.tables`, then each
+table's rows as `INSERT` statements. The result is one portable `.sql` stream, restored by piping it
+back into `clickhouse-client`. Nothing extra is needed on the host — the client is the container's
+own.
+
+Two things to know:
+
+- **The whole server is one backup.** Unlike postgres, ClickHouse has no single `CLICKHOUSE_DB` a
+  deployment agrees on, so every database the container owns goes into the same snapshot — minus
+  ClickHouse's own (`system`, `INFORMATION_SCHEMA`) and any database whose engine proxies another
+  server (`MySQL`, `PostgreSQL`, …), whose data is not dockup's to copy. The dump therefore carries
+  its own database names, and **cannot be restored into a database of a different name**.
+- **Views are recreated, not re-filled.** A view holds no data of its own, so only its definition is
+  dumped — the same goes for `Distributed`, `Dictionary`, `Merge`, `Null` and queue engines. A
+  materialized view is recreated from its own definition, so unless it writes to an explicit `TO`
+  table, it comes back **empty** and must be re-populated from the source data.
+
+A password is optional here, unlike the other database types: the official image starts with a
+`default` user that has none.
 
 ### Volumes
 
@@ -289,7 +329,7 @@ the install directory is not writable by you.
 
 Contributions are welcome. The codebase is TypeScript on [Bun](https://bun.sh), built around
 [Effect](https://effect.website); `docker/` holds a local compose stack (S3-compatible storage plus
-labeled postgres/mariadb/wordpress containers) for exercising the tool end to end. See
+labeled postgres/mariadb/clickhouse/wordpress containers) for exercising the tool end to end. See
 [`CLAUDE.md`](./CLAUDE.md) for the full architecture rundown.
 
 ```bash

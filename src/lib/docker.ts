@@ -39,6 +39,7 @@ const BASE_SCHEMA = z.object({
 const CONTAINER_BACKUP_CONFIG_SCHEMA = z.discriminatedUnion("type", [
   BASE_SCHEMA.extend({ type: z.literal("mariadb") }),
   BASE_SCHEMA.extend({ type: z.literal("postgres") }),
+  BASE_SCHEMA.extend({ type: z.literal("clickhouse") }),
   BASE_SCHEMA.extend({
     type: z.literal("volumes"),
   }),

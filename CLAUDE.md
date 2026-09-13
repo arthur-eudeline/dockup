@@ -151,7 +151,7 @@ pass `env`), MariaDB uses `MYSQL_PWD` and postgres `PGPASSWORD`. On top of that,
 and Discord payloads — a backup failure must never publish the S3 keys to a Discord channel.
 
 **Docker discovery.** `src/lib/docker.ts`. Labels: `dockup.backup.enabled=true`,
-`dockup.backup.name=<snapshot host/tag>`, `dockup.backup.type=mariadb|postgres|volumes`.
+`dockup.backup.name=<snapshot host/tag>`, `dockup.backup.type=mariadb|postgres|clickhouse|volumes`.
 Discovery shells out to `docker ps`/`docker inspect`; DB credentials are pulled from the target
 container's own env vars (`docker exec <id> env`), with `*_PASSWORD_FILE` (Docker secrets)
 resolved by `cat`-ing the file inside the container. `listBackupEnabledContainers` returns
@@ -162,7 +162,7 @@ docker, and the container ones simply go unseen, which the staleness rule escala
 
 **What a restore can read from** (`src/lib/sources.ts`, pure like `targets.ts`). Since the
 destination is chosen first, the backups offered next have to be matched to it — so **every backup
-writes a second tag saying what it is**: `dockup.type=postgres|mariadb|volumes`, built by
+writes a second tag saying what it is**: `dockup.type=postgres|mariadb|clickhouse|volumes`, built by
 `typeTag()` and read back by `snapshotDeclaredType()`. That tag, rather than an index file listing
 the backups next to the repository, because it cannot drift: it is written in the same call as the
 snapshot it describes, pruned with it, and two hosts writing to one repository have no shared file
@@ -195,6 +195,27 @@ cross-restore became possible.
   `pg_dump -h … -p …` against a host target — so `PostgresAccess` builds that pair of fragments per
   source and the restic side is shared. Both pass `-w`: without it libpq falls back to prompting on
   /dev/tty when the password is refused, hanging an unattended run instead of failing it.
+- `clickhouse` — ClickHouse ships no `pg_dump`, and `BACKUP … TO Disk(…)` needs the server
+  configured with an allow-listed destination, which a label-driven tool cannot assume. So the dump
+  is assembled: `discoverClickhouseSchema` asks `system.tables` what exists, then
+  `clickhouseDumpCommand` builds one bash group — the `CREATE DATABASE`/`DROP TABLE` prelude, then
+  the whole schema in a single query (`create_table_query` is a _column_, so N tables cost one round
+  trip and the DDL never touches a command line), then one `select … FORMAT SQLInsert` per table.
+  **The parts are chained with `&&`, never `;`** : a `{ a ; b ; }` group reports the status of its
+  _last_ command, so a `docker exec` failing halfway would hand restic a truncated stream and record
+  it as a success — the exact bug `pipefail` exists to prevent. A container is backed up **whole**
+  (every database it owns) because ClickHouse has no single `CLICKHOUSE_DB`; the dump therefore
+  carries its own database names and cannot be restored into a differently-named one. Databases
+  whose engine proxies another server, and tables holding no data of their own (views, `Distributed`,
+  `Dictionary`, `Merge`, `Null`, queues), get their DDL dumped but not their contents — so a
+  materialized view without a `TO` table comes back empty. `DROP TABLE` is emitted for _every_
+  dumped object, views included, or `CREATE VIEW` fails against a destination that still holds one.
+  Batches are capped at 1000 rows: the 65 000 default blows past `max_query_size` (256 KiB) and the
+  dump would be written happily and refused on the way back in. Credentials go through
+  `CLICKHOUSE_USER`/`CLICKHOUSE_PASSWORD` in the environment rather than `--user`/`--password`,
+  which also sidesteps the precedence between the two — it has changed across versions. A missing
+  password is **not** an error here, unlike postgres/mariadb: the official image's `default` user has
+  none.
 - `volumes` — runs `restic/restic` in a throwaway `docker run --network host` with the
   container's mounts bind-mounted in. Restore stops the container, then restores inside an
   `Effect.ensuring` whose finalizer restarts it — so the container comes back up even if the
@@ -258,7 +279,7 @@ A declared host target additionally needs `pg_dump` and `psql` on `PATH` (the po
 package), at least as recent as the server, and a `pg_hba.conf` line letting the `dockup` user
 authenticate over TCP — `config check` probes both.
 Backup/restore and `service` commands assume a Linux host with systemd and `sudo`; `docker/` holds
-a local compose stack (RustFS as S3, plus labeled postgres/mariadb/wordpress) for exercising the
+a local compose stack (RustFS as S3, plus labeled postgres/mariadb/clickhouse/wordpress) for exercising the
 tool. Note the
 `volumes` path uses `docker run --network host`, which does not work under Docker Desktop.
 
