@@ -1,3 +1,10 @@
+## dockup@0.6.0
+
+### Features
+
+- Restauration ownership (28cf4bc)
+- Restaure avec user role (12320f0)
+
 ## dockup@0.5.0
 
 ### Features
