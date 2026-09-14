@@ -1,4 +1,4 @@
-import { intro, log, outro } from "@clack/prompts";
+import { intro, log, outro, password } from "@clack/prompts";
 import chalk from "chalk";
 import { Command } from "commander";
 import { Effect } from "effect";
@@ -10,6 +10,7 @@ import {
   restoreMariaDB,
   restorePostgres,
   restoreVolumes,
+  setPostgresRolePassword,
 } from "../lib/backup";
 import { runCommand } from "../lib/cli";
 import type { ContainerDiscovery } from "../lib/docker";
@@ -17,6 +18,7 @@ import { ensureDockerPermissions, getContainerVolumes, listBackupEnabledContaine
 import { ConfigTag } from "../lib/effect";
 import { NoCompatibleBackupError, NoSnapshotsError } from "../lib/errors";
 import {
+  prompt,
   promptConfirm,
   promptSelectSnapshot,
   promptSelectSource,
@@ -25,6 +27,7 @@ import {
 } from "../lib/prompts";
 import { listSnapshots } from "../lib/restic";
 import { compatibleSources, dumpPath, groupSnapshotsIntoSources } from "../lib/sources";
+import type { PostgresTarget } from "../lib/targets";
 import { mergeTargets } from "../lib/targets";
 import type { TaskLog } from "../lib/types";
 
@@ -43,6 +46,48 @@ import type { TaskLog } from "../lib/types";
  * `process.exit`, and for volume restores the container is guaranteed to be
  * restarted even on failure or Ctrl-C (see `restoreVolumes`).
  */
+/** Restoring anything but postgres creates no role, so there is nothing to ask about. */
+const NO_ROLES: string[] = [];
+
+/**
+ * Asks for the password of every role the restore had to create.
+ *
+ * A dump carries its owners but not their passwords, so those roles come back
+ * with the right name, the right tables and no way to authenticate: the restore
+ * reports success and the application still cannot connect. This is the one
+ * moment someone is watching, so it is asked here rather than left to be found
+ * out later.
+ *
+ * An empty answer skips — the operator does not always have the password to
+ * hand, and a role may exist only to own things. Whatever is skipped is named at
+ * the end: replacing a silent failure with a prompt nobody has to answer would
+ * only move the surprise.
+ */
+const promptRestoredRolePasswords = (target: PostgresTarget, roles: string[]) =>
+  Effect.gen(function* _promptRestoredRolePasswords() {
+    const named = roles.map((role) => chalk.yellow(role)).join(", ");
+    log.warn(
+      `The restore created ${roles.length === 1 ? "a role that has" : `${roles.length} roles that have`} no password yet: ${named}`
+    );
+
+    const skipped: string[] = [];
+
+    for (const role of roles) {
+      const value = yield* prompt(() => password({ message: `Password for ${chalk.yellow(role)} (empty to skip)` }));
+
+      if (value) {
+        yield* setPostgresRolePassword(target, role, value);
+        log.success(`Password set for ${chalk.yellow(role)}.`);
+      } else {
+        skipped.push(role);
+      }
+    }
+
+    if (skipped.length > 0) {
+      log.warn(`Still unable to connect, no password set: ${skipped.map((role) => chalk.yellow(role)).join(", ")}`);
+    }
+  });
+
 export const RestoreCommand = new Command()
   .name("restore")
   .description("Restores a restic snapshot")
@@ -147,24 +192,31 @@ export const RestoreCommand = new Command()
               return yield* restorePostgres(target, dump, logger);
             }
             case "mariadb": {
-              return yield* restoreMariaDB(target, dump, logger);
+              yield* restoreMariaDB(target, dump, logger);
+              return NO_ROLES;
             }
             case "clickhouse": {
-              return yield* restoreClickhouse(target, dump, logger);
+              yield* restoreClickhouse(target, dump, logger);
+              return NO_ROLES;
             }
             case "volumes": {
-              return yield* restoreVolumes(target, snapshot.id, logger);
+              yield* restoreVolumes(target, snapshot.id, logger);
+              return NO_ROLES;
             }
             default: {
-              return yield* Effect.dieMessage("Unhandled backup type.");
+              return yield* Effect.dieMessage("Unhandled backup type.").pipe(Effect.as(NO_ROLES));
             }
           }
         });
 
-        yield* restore.pipe(
+        const createdRoles = yield* restore.pipe(
           Effect.tapError(() => Effect.sync(() => logger.error("Restore failed."))),
           Effect.tap(() => Effect.sync(() => logger.success("Snapshot restored.")))
         );
+
+        if (target.type === "postgres" && createdRoles.length > 0) {
+          yield* promptRestoredRolePasswords(target, createdRoles);
+        }
 
         outro("Done.");
       })

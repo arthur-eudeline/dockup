@@ -173,17 +173,92 @@ interface PostgresAccess {
   dump: string;
   /** `psql …`, reading a dump from stdin. */
   restore: string;
+  /** `psql … -tAc <sql>`, writing one bare row per line to stdout. */
+  query: (sql: string) => string;
   /** Passed through the environment as PGPASSWORD — never on a command line. */
   password: string;
 }
 
 /**
+ * Ownership and privileges stay *in* the dump — the `ALTER … OWNER TO` and the
+ * `GRANT`s — because dropping them (`--no-owner --no-privileges`) hands every
+ * restored object to whoever ran the restore, i.e. `POSTGRES_USER`. A server
+ * holding one role per database comes back flattened onto the superuser, and
+ * nothing says so: the restore succeeds. The roles those statements name are
+ * created first when the destination does not know them ({@link ROLE_PRELUDE_QUERY}).
+ *
  * `-w` on both binaries: without it libpq falls back to prompting for a password
  * on /dev/tty when the one it was given is refused, which would hang an
  * unattended run rather than fail it.
  */
-const PG_DUMP_FLAGS = raw("--clean --if-exists --no-comments --no-owner --no-privileges -w");
+const PG_DUMP_FLAGS = raw("--clean --if-exists -w");
 const PSQL_FLAGS = raw("-v ON_ERROR_STOP=1 -w");
+
+/**
+ * Every role the dump is about to name, as one guarded `CREATE ROLE` each, ready
+ * to be prepended to it.
+ *
+ * A dump that carries ownership is only restorable where those roles exist, and
+ * the restore runs under `ON_ERROR_STOP=1` — a missing owner would abort it
+ * halfway, *after* `--clean` has dropped the tables. So the dump is made
+ * self-sufficient instead: it creates what it is going to reference.
+ *
+ * The query returns SQL text rather than a list of names, so `format()` does the
+ * identifier and literal quoting server-side and no role name has to survive a
+ * round trip through this process. Each statement is guarded by an `if not
+ * exists`, so a destination that already knows the role is left exactly as it
+ * was — attributes, password and memberships included; only a genuinely absent
+ * role is created. Collected is what a plain dump can reference: owners and
+ * grantees of schemas, relations, routines, types and default ACLs, outside the
+ * system schemas. Built-in `pg_*` roles are skipped (they exist everywhere) and
+ * the `PUBLIC` pseudo-grantee is oid 0, which joins to no row.
+ *
+ * Two things are deliberately *not* reproduced: the password, which lives in
+ * `pg_authid` and would ship a credential inside every dump, and `superuser`,
+ * forced off — restoring a backup may recreate an owner, never a way into the
+ * server it was restored on.
+ */
+const ROLE_PRELUDE_QUERY = `
+with system_schemas as (
+  select oid from pg_namespace where left(nspname, 3) = 'pg_' or nspname = 'information_schema'
+),
+owned(owner, acl) as (
+  select nspowner, nspacl from pg_namespace where oid not in (select oid from system_schemas)
+  union all select relowner, relacl from pg_class where relnamespace not in (select oid from system_schemas)
+  union all select proowner, proacl from pg_proc where pronamespace not in (select oid from system_schemas)
+  union all select typowner, typacl from pg_type where typnamespace not in (select oid from system_schemas)
+  union all select defaclrole, defaclacl from pg_default_acl
+),
+referenced(oid) as (
+  select owner from owned
+  union select (aclexplode(acl)).grantee from owned where acl is not null
+)
+select format(
+  'do $dockup$ begin if not exists (select 1 from pg_roles where rolname = %L)'
+  ' then create role %I nosuperuser %s %s %s %s; end if; end $dockup$;',
+  r.rolname, r.rolname,
+  case when r.rolcanlogin then 'login' else 'nologin' end,
+  case when r.rolinherit then 'inherit' else 'noinherit' end,
+  case when r.rolcreatedb then 'createdb' else 'nocreatedb' end,
+  case when r.rolcreaterole then 'createrole' else 'nocreaterole' end
+)
+from pg_roles r
+join referenced on referenced.oid = r.oid
+where left(r.rolname, 3) <> 'pg_'
+order by r.rolname
+`;
+
+/**
+ * The stream a postgres backup pipes into restic: the `CREATE ROLE` prelude,
+ * then the dump.
+ *
+ * Chained with `&&`, never `;` — a `{ a ; b ; }` group reports the status of its
+ * *last* command, so a prelude query that failed would hand restic a dump whose
+ * owners are unrestorable and record it as a success. Same reasoning as
+ * {@link clickhouseDumpCommand}, same reason `bash -o pipefail` exists here.
+ */
+const postgresDumpCommand = (access: PostgresAccess): string =>
+  `{ ${access.query(ROLE_PRELUDE_QUERY)} && ${access.dump}; }`;
 
 const containerPostgresAccess = (
   container: ContainerBackupConfig
@@ -201,6 +276,8 @@ const containerPostgresAccess = (
     return {
       dump: sh`docker exec -e PGPASSWORD ${container.id} pg_dump ${PG_DUMP_FLAGS} -U ${pg.user} -d ${database}`,
       password: pg.password,
+      query: (sql: string) =>
+        sh`docker exec -e PGPASSWORD ${container.id} psql ${PSQL_FLAGS} -U ${pg.user} -d ${database} -tAc ${sql}`,
       restore: sh`docker exec -i -e PGPASSWORD ${container.id} psql ${PSQL_FLAGS} -U ${pg.user} -d ${database}`,
     };
   });
@@ -223,6 +300,7 @@ const hostPostgresAccess = (connection: ResolvedHostConnection): Effect.Effect<P
     return {
       dump: sh`pg_dump ${PG_DUMP_FLAGS} ${flags}`,
       password: connection.password,
+      query: (sql: string) => sh`psql ${PSQL_FLAGS} ${flags} -tAc ${sql}`,
       restore: sh`psql ${PSQL_FLAGS} ${flags}`,
     };
   });
@@ -471,7 +549,7 @@ export const backupPostgres = (
     const env = yield* configToResticEnv(config);
 
     const output = yield* streamShellOutput({
-      cmd: sh`${raw(access.dump)} | restic backup --stdin --stdin-filename ${`${target.backupName}.sql`} --tag ${target.backupName} --tag ${typeTag("postgres")} --skip-if-unchanged --json --host ${target.backupName}`,
+      cmd: sh`${raw(postgresDumpCommand(access))} | restic backup --stdin --stdin-filename ${`${target.backupName}.sql`} --tag ${target.backupName} --tag ${typeTag("postgres")} --skip-if-unchanged --json --host ${target.backupName}`,
       env: { ...env, PGPASSWORD: access.password },
       logger,
     });
@@ -480,27 +558,95 @@ export const backupPostgres = (
   });
 
 /**
+ * The login roles the destination knows — the two ends of the diff that says
+ * which ones a restore had to create.
+ *
+ * `pg_roles` rather than `pg_authid`: the latter is superuser-only, and nothing
+ * here reads a password, only names. `rolcanlogin` because a role that cannot log
+ * in has no use for one — a pure owner like a read-only grantee comes back whole
+ * and is none of the operator's business.
+ */
+const LOGIN_ROLES_QUERY = "select rolname from pg_roles where rolcanlogin and left(rolname, 3) <> 'pg_'";
+
+const listLoginRoles = (access: PostgresAccess): Effect.Effect<string[], ShellCommandFailureError> =>
+  getShellOutput(access.query(LOGIN_ROLES_QUERY), { env: { PGPASSWORD: access.password } }).pipe(
+    Effect.map((output) =>
+      output
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+    )
+  );
+
+/**
+ * Quotes a postgres identifier / string literal by doubling, which is the whole
+ * rule for both.
+ *
+ * The statement these build is SQL on a pipe, not a shell command, so `sh` does
+ * not apply — but the reason it exists does, and a password is the last value to
+ * assemble by hand. {@link setPostgresRolePassword} pins
+ * `standard_conforming_strings` before using them, so a backslash in a password
+ * stays a backslash whatever the server was configured with.
+ */
+const pgIdent = (value: string): string => `"${value.replaceAll('"', '""')}"`;
+const pgLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`;
+
+/**
+ * Gives a role the password its dump could not carry.
+ *
+ * `access.restore` is already "psql reading SQL from stdin", so the statement
+ * travels the same way a dump does and the password never reaches the process
+ * table. `registerSecret` keeps it out of anything this run goes on to print.
+ */
+export const setPostgresRolePassword = (
+  target: PostgresTarget,
+  role: string,
+  password: string
+): Effect.Effect<void, ShellCommandFailureError | UndefinedVariableError | ParsingError> =>
+  Effect.gen(function* _setPostgresRolePassword() {
+    const access = yield* postgresAccess(target);
+    yield* Effect.sync(() => registerSecret(password));
+
+    const statement = `set standard_conforming_strings = on;\nalter role ${pgIdent(role)} password ${pgLiteral(password)};\n`;
+
+    yield* getShellOutput(access.restore, { env: { PGPASSWORD: access.password }, stdin: statement });
+  });
+
+/**
  * restore a postgres backup into a container or a host database
+ *
+ * The dump's prelude creates the owners the destination is missing, but never
+ * their password — so the restore can succeed and leave an application unable to
+ * connect. Bracketing the restore with {@link listLoginRoles} names those roles
+ * exactly: what was not there a moment ago is what the prelude just created. The
+ * alternative, reading the prelude out of the head of the restic stream, would
+ * predict rather than observe — and would have to cut a pipe mid-dump to do it.
  *
  * @param target the container or host target to restore into
  * @param dump the dump to read back
- * @returns void
+ * @returns the login roles the restore created, each still without a password
  */
 export const restorePostgres = (
   target: PostgresTarget,
   dump: DumpToRestore,
   logger: TaskLog
-): Effect.Effect<void, ShellCommandFailureError | UndefinedVariableError | ParsingError, ConfigTag> =>
+): Effect.Effect<string[], ShellCommandFailureError | UndefinedVariableError | ParsingError, ConfigTag> =>
   Effect.gen(function* _restorePostgres() {
     const access = yield* postgresAccess(target);
     const config = yield* ConfigTag;
     const env = yield* configToResticEnv(config);
+
+    const before = yield* listLoginRoles(access);
 
     yield* streamShellOutput({
       cmd: sh`restic dump ${dump.snapshotId} ${dump.path} | ${raw(access.restore)}`,
       env: { ...env, ...RESTIC_PROGRESS_ENV, PGPASSWORD: access.password },
       logger,
     });
+
+    const after = yield* listLoginRoles(access);
+
+    return after.filter((role) => !before.includes(role));
   });
 
 /**

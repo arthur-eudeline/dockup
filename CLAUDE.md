@@ -211,6 +211,29 @@ cross-restore became possible.
   `pg_dump -h … -p …` against a host target — so `PostgresAccess` builds that pair of fragments per
   source and the restic side is shared. Both pass `-w`: without it libpq falls back to prompting on
   /dev/tty when the password is refused, hanging an unattended run instead of failing it.
+  The postgres dump **keeps ownership and privileges** (no `--no-owner --no-privileges`): stripping
+  them handed every restored object to whoever ran the restore — `POSTGRES_USER` — so a server with
+  one role per database came back flattened onto the superuser, silently, as a successful restore.
+  Carrying them means the dump names roles the destination may not have, and the restore runs under
+  `ON_ERROR_STOP=1`, which would abort it halfway — _after_ `--clean` dropped the tables. So the dump
+  is made self-sufficient: `postgresDumpCommand` prepends what `ROLE_PRELUDE_QUERY` returns, one
+  `CREATE ROLE` per owner/grantee the dump will reference (`format()` quotes them server-side),
+  each guarded by an `if not exists` so an existing role keeps its attributes, password and
+  memberships untouched. Passwords are never reproduced (they would ride inside every dump) and
+  `nosuperuser` is forced — a restore may recreate an owner, never a way into the server. Prelude and
+  `pg_dump` are chained with `&&`, same reason as `clickhouseDumpCommand`. Snapshots taken before
+  this carry no ownership; there is nothing to recover from them.
+  A recreated role has its owner's name and **no password**, so the restore would succeed and leave
+  the application unable to connect — one silent wrong result traded for another. `restorePostgres`
+  therefore brackets the restore with `listLoginRoles` (`pg_roles`, not `pg_authid`: no superuser
+  needed, and only `rolcanlogin` — a pure owner has no use for a password) and returns the
+  difference: what was not there a moment ago is what the prelude just created. Observed, not
+  predicted — the alternative, reading the prelude out of the head of the restic stream, would have
+  to cut a pipe mid-dump. `restore.cmd.ts` then asks for each one and applies it through
+  `setPostgresRolePassword`, which pushes the `ALTER ROLE` down psql's stdin (`access.restore` is
+  already "psql reading SQL from stdin") so the password never reaches the process table, and
+  `registerSecret`s it. An empty answer skips, and whatever was skipped is named at the end.
+  `scripts/restore-passwords.sh` does the same after the fact, for a restore dockup did not run.
 - `clickhouse` — ClickHouse ships no `pg_dump`, and `BACKUP … TO Disk(…)` needs the server
   configured with an allow-listed destination, which a label-driven tool cannot assume. So the dump
   is assembled: `discoverClickhouseSchema` asks `system.tables` what exists, then
