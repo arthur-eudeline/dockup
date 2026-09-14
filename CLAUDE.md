@@ -234,6 +234,20 @@ cross-restore became possible.
   already "psql reading SQL from stdin") so the password never reaches the process table, and
   `registerSecret`s it. An empty answer skips, and whatever was skipped is named at the end.
   `scripts/restore-passwords.sh` does the same after the fact, for a restore dockup did not run.
+  Restoring the owner is not restoring the _right_ owner, though: the dump keeps whoever owned the
+  objects at backup time, which for most setups is the one admin account `pg_dump` ran as (e.g.
+  `postgres`) — correct restoring a backup back where it came from, wrong the moment it lands on
+  fresh infrastructure that should be run by its own role. So `restore.cmd.ts` follows every
+  postgres restore, container or host, with a mandatory prompt for the role that should own the
+  result — one of `listPostgresRoles` (same `pg_roles`/`rolcanlogin` catalogue as the password
+  step) or a freshly `createPostgresRole`-d one — and `reassignDatabaseOwnership` moves every table
+  (`CURRENT_TABLE_OWNERS_QUERY` / `pg_tables`) onto it with one `ALTER TABLE … OWNER TO` per table,
+  not a single `REASSIGN OWNED BY`: the restore connects as the same admin account for every
+  database, and that account also owns objects `REASSIGN` refuses to touch (extension-owned
+  objects, `pg_catalog` internals reached through a default ACL), which aborts the whole statement
+  on the first one it hits. A table-by-table loop only ever touches actual tables, so it cannot trip
+  on those. A role created here for this purpose flows into the same password prompt as a role the
+  prelude created, rather than a second one.
 - `clickhouse` — ClickHouse ships no `pg_dump`, and `BACKUP … TO Disk(…)` needs the server
   configured with an allow-listed destination, which a label-driven tool cannot assume. So the dump
   is assembled: `discoverClickhouseSchema` asks `system.tables` what exists, then

@@ -650,6 +650,120 @@ export const restorePostgres = (
   });
 
 /**
+ * Every login role the destination knows — the candidates offered when a
+ * restore asks who should own the database it just poured in.
+ *
+ * Reuses {@link LOGIN_ROLES_QUERY}: a role that cannot log in has no business
+ * owning an application's tables either, and it is the same list a restore
+ * already shows for password prompts.
+ */
+export const listPostgresRoles = (
+  target: PostgresTarget
+): Effect.Effect<string[], ShellCommandFailureError | UndefinedVariableError | ParsingError> =>
+  Effect.gen(function* _listPostgresRoles() {
+    const access = yield* postgresAccess(target);
+    return yield* listLoginRoles(access);
+  });
+
+/**
+ * Creates a fresh, unprivileged login role to own a restored database — used
+ * when none of the existing roles on the destination should get the job.
+ *
+ * Guarded by `if not exists`, same as {@link ROLE_PRELUDE_QUERY}, so asking for
+ * a name that turns out to already exist is a no-op rather than a failure.
+ * No password: it travels the same path as every other role a restore leaves
+ * without one, and is asked for right after by the same prompt.
+ */
+export const createPostgresRole = (
+  target: PostgresTarget,
+  role: string
+): Effect.Effect<void, ShellCommandFailureError | UndefinedVariableError | ParsingError> =>
+  Effect.gen(function* _createPostgresRole() {
+    const access = yield* postgresAccess(target);
+    const statement = `do $dockup$ begin if not exists (select 1 from pg_roles where rolname = ${pgLiteral(role)}) then create role ${pgIdent(role)} login nosuperuser nocreatedb nocreaterole inherit; end if; end $dockup$;\n`;
+
+    yield* getShellOutput(access.restore, { env: { PGPASSWORD: access.password }, stdin: statement });
+  });
+
+/**
+ * Every role that currently owns a table in the destination database, once
+ * the restore has run — outside the system schemas, `pg_tables` rather than
+ * `pg_class` so a sequence, view or index never counts as a table needing
+ * reassignment.
+ */
+const CURRENT_TABLE_OWNERS_QUERY =
+  "select distinct tableowner from pg_tables where schemaname not in ('pg_catalog', 'information_schema')";
+
+/**
+ * One `ALTER TABLE … OWNER TO` per table, rather than a single `REASSIGN
+ * OWNED BY`: the restore runs as one admin account for every database
+ * (typically `postgres`), and that account also owns objects `REASSIGN`
+ * refuses to touch — extension-owned objects, `pg_catalog` internals reached
+ * through a default ACL — which aborts the *whole* statement on the first
+ * one it hits. A table-by-table loop only ever touches actual tables, so it
+ * cannot trip on those, and `newOwner` is spliced in as a literal identifier
+ * (quoted once, here, not per row) rather than passed through `format`'s own
+ * `%I`, since it is the same value on every iteration.
+ */
+const reassignTablesStatement = (newOwner: string): string => `
+do $dockup$
+declare
+  t record;
+begin
+  for t in
+    select schemaname, tablename from pg_tables
+    where schemaname not in ('pg_catalog', 'information_schema')
+  loop
+    execute format('alter table %I.%I owner to ${pgIdent(newOwner)}', t.schemaname, t.tablename);
+  end loop;
+end $dockup$;
+`;
+
+/**
+ * Moves every table in the destination database onto `newOwner`, whoever the
+ * dump's `ALTER … OWNER TO` and {@link ROLE_PRELUDE_QUERY} left holding them.
+ *
+ * A dump keeps its *original* owner (see {@link postgresDumpCommand}), which is
+ * exactly right for restoring a backup back where it came from but wrong the
+ * moment a database is poured into fresh infrastructure: without this step,
+ * every table restored from a source dumped as an admin account (`postgres`,
+ * typically) stays owned by that account rather than by whichever role is
+ * meant to run this database going forward.
+ *
+ * Skips the statement entirely when nothing needs moving — `newOwner` may
+ * already own every table, e.g. when the database is being restored back into
+ * the account that took the dump.
+ *
+ * @returns the roles ownership was actually moved away from
+ */
+export const reassignDatabaseOwnership = (
+  target: PostgresTarget,
+  newOwner: string
+): Effect.Effect<string[], ShellCommandFailureError | UndefinedVariableError | ParsingError> =>
+  Effect.gen(function* _reassignDatabaseOwnership() {
+    const access = yield* postgresAccess(target);
+
+    const output = yield* getShellOutput(access.query(CURRENT_TABLE_OWNERS_QUERY), {
+      env: { PGPASSWORD: access.password },
+    });
+    const previousOwners = output
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && line !== newOwner);
+
+    if (previousOwners.length === 0) {
+      return [];
+    }
+
+    yield* getShellOutput(access.restore, {
+      env: { PGPASSWORD: access.password },
+      stdin: reassignTablesStatement(newOwner),
+    });
+
+    return previousOwners;
+  });
+
+/**
  * Gets the credentials a ClickHouse container was started with.
  *
  * Unlike postgres and mariadb, a missing password is *not* an error here: the

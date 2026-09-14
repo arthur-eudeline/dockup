@@ -1,9 +1,12 @@
-import { intro, log, outro, password } from "@clack/prompts";
+import { intro, log, outro, password, text } from "@clack/prompts";
 import chalk from "chalk";
 import { Command } from "commander";
 import { Effect } from "effect";
 
 import {
+  createPostgresRole,
+  listPostgresRoles,
+  reassignDatabaseOwnership,
   resolveContainerTargets,
   resolveHostTargets,
   restoreClickhouse,
@@ -20,6 +23,7 @@ import { NoCompatibleBackupError, NoSnapshotsError } from "../lib/errors";
 import {
   prompt,
   promptConfirm,
+  promptSelect,
   promptSelectSnapshot,
   promptSelectSource,
   promptSelectTarget,
@@ -86,6 +90,47 @@ const promptRestoredRolePasswords = (target: PostgresTarget, roles: string[]) =>
     if (skipped.length > 0) {
       log.warn(`Still unable to connect, no password set: ${skipped.map((role) => chalk.yellow(role)).join(", ")}`);
     }
+  });
+
+/** Picked when the operator wants a role that does not exist on the destination yet. */
+const CREATE_NEW_ROLE = Symbol("create-new-role");
+
+/**
+ * Asks who should own the restored database's tables — mandatory for every
+ * postgres restore, container or host.
+ *
+ * A dump keeps the owner it was taken with (see `postgresDumpCommand`), which
+ * is exactly right restoring a backup back where it came from, but is usually
+ * the admin account `pg_dump` ran as, not the role the application is meant
+ * to run as, the moment the same backup lands anywhere else. Offers every
+ * role already on the destination, plus creating a fresh one on the spot —
+ * the same catalogue `promptRestoredRolePasswords` already draws from.
+ */
+const promptDatabaseOwner = (target: PostgresTarget) =>
+  Effect.gen(function* _promptDatabaseOwner() {
+    const roles = yield* listPostgresRoles(target);
+
+    const choice = yield* promptSelect<string | typeof CREATE_NEW_ROLE>({
+      message: `Which role should own ${chalk.blue(target.backupName)}'s tables?`,
+      options: [
+        ...roles.map((role) => ({ label: role, value: role })),
+        { label: "Create a new role…", value: CREATE_NEW_ROLE },
+      ],
+    });
+
+    if (choice !== CREATE_NEW_ROLE) {
+      return { justCreated: false, role: choice };
+    }
+
+    const role = yield* prompt(() =>
+      text({
+        message: "Name of the new role",
+        validate: (value) => (/^[a-z_][a-z0-9_]*$/i.test(value ?? "") ? undefined : "Use a valid postgres role name."),
+      })
+    );
+
+    yield* createPostgresRole(target, role);
+    return { justCreated: true, role };
   });
 
 export const RestoreCommand = new Command()
@@ -214,8 +259,28 @@ export const RestoreCommand = new Command()
           Effect.tap(() => Effect.sync(() => logger.success("Snapshot restored.")))
         );
 
-        if (target.type === "postgres" && createdRoles.length > 0) {
-          yield* promptRestoredRolePasswords(target, createdRoles);
+        // Ownership is never left to whatever the dump happened to carry: every
+        // postgres restore picks (or creates) the role that owns the result.
+        let rolesNeedingPasswords = createdRoles;
+        if (target.type === "postgres") {
+          const owner = yield* promptDatabaseOwner(target);
+          const movedFrom = yield* reassignDatabaseOwnership(target, owner.role);
+
+          if (movedFrom.length > 0) {
+            log.success(
+              `Ownership of ${chalk.blue(target.backupName)} moved from ${movedFrom.map((role) => chalk.yellow(role)).join(", ")} to ${chalk.yellow(owner.role)}.`
+            );
+          } else {
+            log.info(`${chalk.yellow(owner.role)} already owns everything in ${chalk.blue(target.backupName)}.`);
+          }
+
+          if (owner.justCreated) {
+            rolesNeedingPasswords = [...createdRoles, owner.role];
+          }
+        }
+
+        if (target.type === "postgres" && rolesNeedingPasswords.length > 0) {
+          yield* promptRestoredRolePasswords(target, rolesNeedingPasswords);
         }
 
         outro("Done.");
