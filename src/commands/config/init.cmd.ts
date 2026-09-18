@@ -5,7 +5,8 @@ import { Effect } from "effect";
 import { z } from "zod";
 
 import { runStandalone } from "../../lib/cli";
-import { CONFIG_SCHEMA, configPath, validateConfig, writeConfig } from "../../lib/config";
+import type { Config } from "../../lib/config";
+import { CONFIG_SCHEMA, configPath, readConfig, validateConfig, writeConfig } from "../../lib/config";
 import {
   NonInteractiveConfigError,
   ParsingError,
@@ -56,27 +57,52 @@ const flagValue = (options: ConfigInitOptions, field: Field): string | undefined
     DISCORD_WEBHOOK: options.discordWebhook,
   })[field];
 
-/** Validate a single value against its slice of `CONFIG_SCHEMA` — shared by the prompts. */
-const validateField = (field: Field) => (value: unknown) => {
+/**
+ * Validate a single value against its slice of `CONFIG_SCHEMA` — shared by the prompts.
+ *
+ * With a `previous` value on hand an empty answer is valid: it means "keep it".
+ */
+const validateField = (field: Field, previous?: string) => (value: unknown) => {
+  if (previous !== undefined && (value === undefined || value === "")) return;
   const { error } = CONFIG_SCHEMA.shape[field].safeParse(value);
   if (error) return z.prettifyError(error);
 };
 
-const PROMPTS: Record<Field, () => Promise<string | symbol>> = {
-  AWS_ACCESS_KEY_ID: () => text({ message: "S3 Access key ID", validate: validateField("AWS_ACCESS_KEY_ID") }),
-  AWS_SECRET_ACCESS_KEY: () => password({ message: "S3 Secret key", validate: validateField("AWS_SECRET_ACCESS_KEY") }),
-  RESTIC_REPOSITORY: () =>
+/** What tells the user an empty answer keeps the current value — shown for secrets as a mask, never the value. */
+const keepHint = (previous: string | undefined, secret: boolean): string =>
+  previous === undefined ? "" : chalk.dim(` (empty to keep ${secret ? "the current value" : previous})`);
+
+/**
+ * One prompt per field. `previous` is what the file being overwritten holds: an
+ * empty answer keeps it, so re-running `init` to change one value does not mean
+ * retyping the four others.
+ */
+const PROMPTS: Record<Field, (previous?: string) => Promise<string | symbol>> = {
+  AWS_ACCESS_KEY_ID: (previous) =>
     text({
-      message: "S3 URL (s3:https://host:port/bucket)",
-      placeholder: "s3:https://host:port/bucket",
-      validate: validateField("RESTIC_REPOSITORY"),
+      message: `S3 Access key ID${keepHint(previous, false)}`,
+      validate: validateField("AWS_ACCESS_KEY_ID", previous),
     }),
-  RESTIC_PASSWORD: () =>
-    text({ message: "Restic password store (min 24, note it !)", validate: validateField("RESTIC_PASSWORD") }),
-  DISCORD_WEBHOOK: () =>
+  AWS_SECRET_ACCESS_KEY: (previous) =>
+    password({
+      message: `S3 Secret key${keepHint(previous, true)}`,
+      validate: validateField("AWS_SECRET_ACCESS_KEY", previous),
+    }),
+  RESTIC_REPOSITORY: (previous) =>
     text({
-      message: "Discord webhook endpoint. Will be used to log backups",
-      validate: validateField("DISCORD_WEBHOOK"),
+      message: `S3 URL (s3:https://host:port/bucket)${keepHint(previous, false)}`,
+      placeholder: "s3:https://host:port/bucket",
+      validate: validateField("RESTIC_REPOSITORY", previous),
+    }),
+  RESTIC_PASSWORD: (previous) =>
+    text({
+      message: `Restic password store (min 24, note it !)${keepHint(previous, true)}`,
+      validate: validateField("RESTIC_PASSWORD", previous),
+    }),
+  DISCORD_WEBHOOK: (previous) =>
+    text({
+      message: `Discord webhook endpoint. Will be used to log backups${keepHint(previous, true)}`,
+      validate: validateField("DISCORD_WEBHOOK", previous),
     }),
 };
 
@@ -114,6 +140,16 @@ const readJsonDocument = (
 
     return parsed as Record<string, unknown>;
   });
+
+/** The existing configuration, or `null` (with a warning) when it cannot be read. */
+const readPreviousConfig: Effect.Effect<Config | null> = readConfig.pipe(
+  Effect.catchAll(() =>
+    Effect.as(
+      Effect.sync(() => log.warn("The existing configuration could not be read: nothing to keep.")),
+      null
+    )
+  )
+);
 
 export const ConfigInitCommand = new Command()
   .name("init")
@@ -168,9 +204,16 @@ export const ConfigInitCommand = new Command()
 
         const document = options.json ? yield* readJsonDocument(options.json) : {};
 
+        // What the file being overwritten holds, so an empty answer can keep it.
+        // Best-effort: a config too broken to read is precisely one people
+        // re-run `init` to replace, so it just means there is nothing to keep.
+        const previous = alreadyExists && canPrompt ? yield* readPreviousConfig : null;
+
         // Start from the JSON document so keys it carries that `init` does not
         // collect itself (notably `hosts`) reach `validateConfig` untouched.
-        const assembled: Record<string, unknown> = { ...document };
+        // Host targets are not asked here either, so they would be silently
+        // wiped by an overwrite — carry the existing ones over instead.
+        const assembled: Record<string, unknown> = { ...(previous ? { hosts: previous.hosts } : {}), ...document };
         const missing: string[] = [];
 
         for (const field of FIELDS) {
@@ -182,7 +225,9 @@ export const ConfigInitCommand = new Command()
           }
 
           if (canPrompt) {
-            assembled[field] = yield* prompt(PROMPTS[field]);
+            const kept = previous?.[field];
+            const answer = yield* prompt(() => PROMPTS[field](kept));
+            assembled[field] = answer === "" && kept !== undefined ? kept : answer;
             continue;
           }
 
