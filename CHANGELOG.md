@@ -1,3 +1,9 @@
+## dockup@0.8.0
+
+### Features
+
+- Allow partial override (807fd78)
+
 ## dockup@0.7.0
 
 ### Features
