@@ -1,3 +1,13 @@
+## dockup@0.7.0
+
+### Features
+
+- Improve discord webhook content (f71099d)
+
+### Bug fixes
+
+- Restic retry lock (c512ebc)
+
 ## dockup@0.6.0
 
 ### Features
