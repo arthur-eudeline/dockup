@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+
 import { spawn } from "bun";
 import chalk from "chalk";
 import { Effect } from "effect";
@@ -7,6 +10,7 @@ import type { Config } from "./config";
 import { ConfigTag } from "./effect";
 import { EmptyBackupError, ParsingError, ShellCommandFailureError, ResticRepoNotInitializedError } from "./errors";
 import { redact, registerSecret } from "./redact";
+import { STATE_DIR } from "./state";
 import { formatBytes, formatDuration, formatHumanDate, getShellOutput, sh } from "./utils";
 
 // oxlint-disable-next-line typescript/consistent-type-definitions
@@ -15,7 +19,89 @@ export type ResticConf = {
   AWS_SECRET_ACCESS_KEY: string;
   RESTIC_PASSWORD: string;
   RESTIC_REPOSITORY: string;
+  RESTIC_CACHE_DIR?: string;
 };
+
+/**
+ * Where restic keeps its cache when `$HOME` cannot hold it.
+ *
+ * The `dockup` system user has no home directory (`/nonexistent`), so restic's
+ * default `~/.cache/restic` cannot be created: every command then ran cache-less
+ * and printed `unable to open cache: mkdir /nonexistent: permission denied`, which
+ * ended up quoted in front of the real error in the Discord report.
+ */
+const resticCacheDir = (): string | undefined => {
+  if (process.env.RESTIC_CACHE_DIR) {
+    return undefined;
+  }
+  const home = process.env.HOME;
+
+  return home && existsSync(home) ? undefined : join(STATE_DIR, "cache");
+};
+
+/**
+ * How long a restic command waits for the repository lock before giving up.
+ *
+ * Every host of a fleet runs its backup from the same 02:00 timer against one
+ * repository, and `restic forget` takes an *exclusive* lock that shuts out every
+ * concurrent `backup` — without a retry the loser failed instantly and the
+ * night's backup for that service was lost. Needs restic ≥ {@link MIN_RESTIC_VERSION}.
+ */
+export const RESTIC_RETRY_LOCK = "--retry-lock 10m";
+
+/** The oldest restic that understands {@link RESTIC_RETRY_LOCK} — older ones reject the flag outright. */
+export const MIN_RESTIC_VERSION = [0, 16, 0] as const;
+
+const isOlderThan = (version: readonly number[], minimum: readonly number[]): boolean => {
+  for (const [i, part] of minimum.entries()) {
+    const actual = version[i] ?? 0;
+    if (actual !== part) {
+      return actual < part;
+    }
+  }
+
+  return false;
+};
+
+/**
+ * Checks that the `restic` on `PATH` is recent enough, and returns its version.
+ * Reads `restic version` (`restic 0.16.4 compiled with go1.22 on linux/amd64`).
+ */
+export const ensureResticVersion = (): Effect.Effect<string, ShellCommandFailureError> =>
+  Effect.gen(function* _ensureResticVersion() {
+    const output = yield* getShellOutput("restic version").pipe(
+      Effect.mapError(
+        (cause) =>
+          new ShellCommandFailureError({
+            cause,
+            message: `restic is not installed or not on your PATH.\n${cause.message}`,
+          })
+      )
+    );
+
+    const found = /restic\s+(\d+)\.(\d+)(?:\.(\d+))?/.exec(output);
+    if (!found) {
+      return yield* Effect.fail(
+        new ShellCommandFailureError({
+          cause: output,
+          message: `Could not read the restic version from : ${output.trim()}`,
+        })
+      );
+    }
+
+    const version = found.slice(1).map((part) => Number(part ?? 0));
+    const label = version.join(".");
+    if (isOlderThan(version, MIN_RESTIC_VERSION)) {
+      return yield* Effect.fail(
+        new ShellCommandFailureError({
+          cause: output,
+          message: `restic ${label} is too old, dockup needs ${MIN_RESTIC_VERSION.join(".")} or newer (--retry-lock).`,
+        })
+      );
+    }
+
+    return label;
+  });
 
 /**
  * Converts the dockup configuration to restic required environment variables
@@ -29,11 +115,14 @@ export const configToResticEnv = (config: Config): Effect.Effect<ResticConf> =>
     registerSecret(config.AWS_SECRET_ACCESS_KEY);
     registerSecret(config.RESTIC_PASSWORD);
 
+    const cacheDir = resticCacheDir();
+
     return {
       AWS_ACCESS_KEY_ID: config.AWS_ACCESS_KEY_ID,
       AWS_SECRET_ACCESS_KEY: config.AWS_SECRET_ACCESS_KEY,
       RESTIC_PASSWORD: config.RESTIC_PASSWORD,
       RESTIC_REPOSITORY: config.RESTIC_REPOSITORY,
+      ...(cacheDir ? { RESTIC_CACHE_DIR: cacheDir } : {}),
     };
   });
 
@@ -166,7 +255,7 @@ export const resticCleanUp = (): Effect.Effect<ResticCleanUpStructuredOutput, Sh
     // would put a snapshot carrying `dockup.type=…` in a *different* group from
     // an older one without it, and each group would then keep its own 7/4/3.
     const output = yield* getShellOutput(
-      "restic forget --group-by host --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --json",
+      `restic forget ${RESTIC_RETRY_LOCK} --group-by host --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --json`,
       { env }
     );
 

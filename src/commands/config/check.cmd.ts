@@ -16,7 +16,7 @@ import { ensureDockerPermissions, listBackupEnabledContainers } from "../../lib/
 import type { ContainerBackupConfig } from "../../lib/docker";
 import { ConfigTag } from "../../lib/effect";
 import { safeSpinner } from "../../lib/prompts";
-import { ensureRepoInitialized } from "../../lib/restic";
+import { ensureRepoInitialized, ensureResticVersion, MIN_RESTIC_VERSION } from "../../lib/restic";
 import { STATE_DIR, STATE_PATH } from "../../lib/state";
 import { ensureWritePermission } from "../../lib/utils";
 
@@ -65,6 +65,12 @@ export const ConfigCheckCommand = new Command()
           title: "config content...",
           onSuccess: () => chalk.green("config content : valid"),
           onError: (e) => chalk.red(`config content : invalid\n${e.message}`),
+        });
+
+        yield* safeSpinner(ensureResticVersion(), {
+          title: "restic version...",
+          onSuccess: (version) => chalk.green(`restic : ${version} (>= ${MIN_RESTIC_VERSION.join(".")} required)`),
+          onError: (e) => chalk.red(`restic : ${e.message}`),
         });
 
         yield* safeSpinner(ensureDockerPermissions(), {

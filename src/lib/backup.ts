@@ -14,7 +14,7 @@ import { ConfigTag } from "./effect";
 import type { EmptyBackupError } from "./errors";
 import { ParsingError, ShellCommandFailureError, UndefinedVariableError } from "./errors";
 import { registerSecret } from "./redact";
-import { configToResticEnv, parseResticBackupOutput, RESTIC_PROGRESS_ENV } from "./restic";
+import { configToResticEnv, parseResticBackupOutput, RESTIC_PROGRESS_ENV, RESTIC_RETRY_LOCK } from "./restic";
 import type { ResticSuccessfulBackupStructuredOutput } from "./restic";
 import { typeTag } from "./sources";
 import type { ClickhouseTarget, HostBackupTarget, PostgresTarget, ResolvedHostConnection } from "./targets";
@@ -83,7 +83,7 @@ export const backupMariaDB = (
     // `--password=…`, keeping it out of the process table and of any error
     // message quoting the command.
     const output = yield* streamShellOutput({
-      cmd: sh`docker exec -e MYSQL_PWD ${container.id} mariadb-dump -u ${mdb.user} --databases ${mdb.database} --skip-comments | restic backup --stdin --stdin-filename ${`${container.backupName}.sql`} --tag ${container.backupName} --tag ${typeTag("mariadb")} --skip-if-unchanged --json --host ${container.backupName}`,
+      cmd: sh`docker exec -e MYSQL_PWD ${container.id} mariadb-dump -u ${mdb.user} --databases ${mdb.database} --skip-comments | restic backup ${raw(RESTIC_RETRY_LOCK)} --stdin --stdin-filename ${`${container.backupName}.sql`} --tag ${container.backupName} --tag ${typeTag("mariadb")} --skip-if-unchanged --json --host ${container.backupName}`,
       env: { ...env, MYSQL_PWD: mdb.password },
       logger,
     });
@@ -549,7 +549,7 @@ export const backupPostgres = (
     const env = yield* configToResticEnv(config);
 
     const output = yield* streamShellOutput({
-      cmd: sh`${raw(postgresDumpCommand(access))} | restic backup --stdin --stdin-filename ${`${target.backupName}.sql`} --tag ${target.backupName} --tag ${typeTag("postgres")} --skip-if-unchanged --json --host ${target.backupName}`,
+      cmd: sh`${raw(postgresDumpCommand(access))} | restic backup ${raw(RESTIC_RETRY_LOCK)} --stdin --stdin-filename ${`${target.backupName}.sql`} --tag ${target.backupName} --tag ${typeTag("postgres")} --skip-if-unchanged --json --host ${target.backupName}`,
       env: { ...env, PGPASSWORD: access.password },
       logger,
     });
@@ -685,27 +685,40 @@ export const createPostgresRole = (
     yield* getShellOutput(access.restore, { env: { PGPASSWORD: access.password }, stdin: statement });
   });
 
-/**
- * Every role that currently owns a table in the destination database, once
- * the restore has run — outside the system schemas, `pg_tables` rather than
- * `pg_class` so a sequence, view or index never counts as a table needing
- * reassignment.
- */
-const CURRENT_TABLE_OWNERS_QUERY =
-  "select distinct tableowner from pg_tables where schemaname not in ('pg_catalog', 'information_schema')";
+/** Every schema in the database that is not one of postgres' own. */
+const USER_SCHEMAS_FILTER = "nspname not in ('pg_catalog', 'information_schema') and left(nspname, 3) <> 'pg_'";
 
 /**
- * One `ALTER TABLE … OWNER TO` per table, rather than a single `REASSIGN
- * OWNED BY`: the restore runs as one admin account for every database
- * (typically `postgres`), and that account also owns objects `REASSIGN`
- * refuses to touch — extension-owned objects, `pg_catalog` internals reached
- * through a default ACL — which aborts the *whole* statement on the first
- * one it hits. A table-by-table loop only ever touches actual tables, so it
- * cannot trip on those, and `newOwner` is spliced in as a literal identifier
- * (quoted once, here, not per row) rather than passed through `format`'s own
- * `%I`, since it is the same value on every iteration.
+ * Every role that currently owns a table or a schema in the destination
+ * database, once the restore has run — `pg_tables` rather than `pg_class` so
+ * a sequence, view or index never counts as a table needing reassignment,
+ * and every non-system schema (see {@link USER_SCHEMAS_FILTER}), not just
+ * `public` — a dump can restore into any schema it was taken from.
  */
-const reassignTablesStatement = (newOwner: string): string => `
+const CURRENT_OWNERS_QUERY = `
+select tableowner as owner from pg_tables where schemaname not in ('pg_catalog', 'information_schema')
+union
+select r.rolname as owner from pg_namespace n join pg_roles r on r.oid = n.nspowner where ${USER_SCHEMAS_FILTER}
+`;
+
+/**
+ * One `ALTER TABLE …` / `ALTER SCHEMA … OWNER TO` per object, rather than a
+ * single `REASSIGN OWNED BY`: the restore runs as one admin account for every
+ * database (typically `postgres`), and that account also owns objects
+ * `REASSIGN` refuses to touch — extension-owned objects, `pg_catalog`
+ * internals reached through a default ACL, `public` itself when the server
+ * predates it having its own owner — which aborts the *whole* statement on
+ * the first one it hits. Looping object by object avoids most of that already
+ * (a plain table or schema is never one of those), and each `execute` is
+ * still wrapped in its own `exception when others` so a single leftover
+ * exotic case — this database's own equivalent of one — is skipped and named
+ * rather than losing every table and schema after it.
+ *
+ * `newOwner` is spliced in as a literal identifier (quoted once, here, not
+ * per row) rather than passed through `format`'s own `%I`, since it is the
+ * same value on every iteration.
+ */
+const reassignOwnershipStatement = (newOwner: string): string => `
 do $dockup$
 declare
   t record;
@@ -714,14 +727,29 @@ begin
     select schemaname, tablename from pg_tables
     where schemaname not in ('pg_catalog', 'information_schema')
   loop
-    execute format('alter table %I.%I owner to ${pgIdent(newOwner)}', t.schemaname, t.tablename);
+    begin
+      execute format('alter table %I.%I owner to ${pgIdent(newOwner)}', t.schemaname, t.tablename);
+    exception when others then
+      raise notice 'dockup: could not reassign table %.%: %', t.schemaname, t.tablename, sqlerrm;
+    end;
+  end loop;
+
+  for t in
+    select nspname from pg_namespace where ${USER_SCHEMAS_FILTER}
+  loop
+    begin
+      execute format('alter schema %I owner to ${pgIdent(newOwner)}', t.nspname);
+    exception when others then
+      raise notice 'dockup: could not reassign schema %: %', t.nspname, sqlerrm;
+    end;
   end loop;
 end $dockup$;
 `;
 
 /**
- * Moves every table in the destination database onto `newOwner`, whoever the
- * dump's `ALTER … OWNER TO` and {@link ROLE_PRELUDE_QUERY} left holding them.
+ * Moves every table and every schema of the destination database onto
+ * `newOwner`, whoever the dump's `ALTER … OWNER TO` and
+ * {@link ROLE_PRELUDE_QUERY} left holding them.
  *
  * A dump keeps its *original* owner (see {@link postgresDumpCommand}), which is
  * exactly right for restoring a backup back where it came from but wrong the
@@ -731,7 +759,7 @@ end $dockup$;
  * meant to run this database going forward.
  *
  * Skips the statement entirely when nothing needs moving — `newOwner` may
- * already own every table, e.g. when the database is being restored back into
+ * already own everything, e.g. when the database is being restored back into
  * the account that took the dump.
  *
  * @returns the roles ownership was actually moved away from
@@ -743,13 +771,17 @@ export const reassignDatabaseOwnership = (
   Effect.gen(function* _reassignDatabaseOwnership() {
     const access = yield* postgresAccess(target);
 
-    const output = yield* getShellOutput(access.query(CURRENT_TABLE_OWNERS_QUERY), {
+    const output = yield* getShellOutput(access.query(CURRENT_OWNERS_QUERY), {
       env: { PGPASSWORD: access.password },
     });
-    const previousOwners = output
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && line !== newOwner);
+    const previousOwners = [
+      ...new Set(
+        output
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0 && line !== newOwner)
+      ),
+    ];
 
     if (previousOwners.length === 0) {
       return [];
@@ -757,7 +789,7 @@ export const reassignDatabaseOwnership = (
 
     yield* getShellOutput(access.restore, {
       env: { PGPASSWORD: access.password },
-      stdin: reassignTablesStatement(newOwner),
+      stdin: reassignOwnershipStatement(newOwner),
     });
 
     return previousOwners;
@@ -1027,7 +1059,7 @@ export const backupClickhouse = (
     const env = yield* configToResticEnv(config);
 
     const output = yield* streamShellOutput({
-      cmd: sh`${raw(clickhouseDumpCommand(target, schema))} | restic backup --stdin --stdin-filename ${`${target.backupName}.sql`} --tag ${target.backupName} --tag ${typeTag("clickhouse")} --skip-if-unchanged --json --host ${target.backupName}`,
+      cmd: sh`${raw(clickhouseDumpCommand(target, schema))} | restic backup ${raw(RESTIC_RETRY_LOCK)} --stdin --stdin-filename ${`${target.backupName}.sql`} --tag ${target.backupName} --tag ${typeTag("clickhouse")} --skip-if-unchanged --json --host ${target.backupName}`,
       env: { ...env, ...clickhouseEnv(credentials) },
       logger,
     });
@@ -1113,7 +1145,7 @@ export const backupVolumes = (
       // `env` is passed through so the `-e NAME` flags above resolve from this
       // process' environment instead of spelling the credentials on the command line.
       env,
-      cmd: sh`docker run --rm --name ${helperContainerName("backup", container.backupName)} --network host ${raw(volumeArgs)} ${raw(envArgs)} restic/restic:latest backup ${raw(volumeDests)} --tag ${container.backupName} --tag ${typeTag("volumes")} --json --host ${container.backupName}`,
+      cmd: sh`docker run --rm --name ${helperContainerName("backup", container.backupName)} --network host ${raw(volumeArgs)} ${raw(envArgs)} restic/restic:latest backup ${raw(RESTIC_RETRY_LOCK)} ${raw(volumeDests)} --tag ${container.backupName} --tag ${typeTag("volumes")} --json --host ${container.backupName}`,
     });
 
     return yield* parseResticBackupOutput(container.backupName, output);
