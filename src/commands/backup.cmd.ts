@@ -1,3 +1,5 @@
+import { hostname } from "node:os";
+
 import { intro, log, outro, spinner } from "@clack/prompts";
 import chalk from "chalk";
 import { Command } from "commander";
@@ -27,6 +29,7 @@ import type { DockupState } from "../lib/state";
 import { mergeTargets } from "../lib/targets";
 import type { BackupTarget } from "../lib/targets";
 import type { TaskLog } from "../lib/types";
+import { VERSION } from "../lib/version";
 
 type Report = Ref.Ref<ResticStructuredOutput[]>;
 
@@ -307,7 +310,7 @@ export const BackupCommand = new Command()
         const { alerts, state: nextState } = applyRun(state, outcomesFromReport(lines), now);
         yield* announce(alerts);
 
-        const header = `📦 dockup — backup of ${now.toLocaleDateString("fr")} at ${now.toLocaleTimeString("fr")}`;
+        const header = `📦 dockup v${VERSION} on ${hostname()} — backup of ${now.toLocaleDateString("fr")} at ${now.toLocaleTimeString("fr")}`;
         const messages = yield* formatDiscordReport(lines, header);
 
         // Alerts lead: a three-day-old failure matters more than tonight's lines.
