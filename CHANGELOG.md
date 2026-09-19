@@ -1,3 +1,10 @@
+## dockup@0.8.1
+
+### Bug fixes
+
+- **state:** Hand the state file to the directory's group on write (073ea1e)
+- Config override password input (90ed7ba)
+
 ## dockup@0.8.0
 
 ### Features
