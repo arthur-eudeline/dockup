@@ -83,11 +83,14 @@ const PROMPTS: Record<Field, (previous?: string) => Promise<string | symbol>> = 
       message: `S3 Access key ID${keepHint(previous, false)}`,
       validate: validateField("AWS_ACCESS_KEY_ID", previous),
     }),
-  AWS_SECRET_ACCESS_KEY: (previous) =>
-    password({
+  AWS_SECRET_ACCESS_KEY: async (previous) => {
+    const answer = await password({
       message: `S3 Secret key${keepHint(previous, true)}`,
       validate: validateField("AWS_SECRET_ACCESS_KEY", previous),
-    }),
+    });
+    // Unlike `text`, clack's password prompt resolves `undefined` — not "" — on an empty submit.
+    return answer ?? "";
+  },
   RESTIC_REPOSITORY: (previous) =>
     text({
       message: `S3 URL (s3:https://host:port/bucket)${keepHint(previous, false)}`,
