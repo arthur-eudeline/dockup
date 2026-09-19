@@ -15,7 +15,7 @@
  * Losing this file is never fatal: it degrades the alerting, not the backups.
  */
 
-import { chmod, mkdir, rename, unlink } from "node:fs/promises";
+import { chmod, chown, mkdir, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import { Effect } from "effect";
@@ -147,6 +147,26 @@ export const readState = (): Effect.Effect<DockupState, StatePersistenceError, n
   });
 
 /**
+ * Gives a freshly written file the group of the state directory.
+ *
+ * A new file gets its creator's *primary* group, not the directory's: state
+ * written by an admin running `dockup backup` by hand came out `admin:admin 660`
+ * and the `dockup` service account, in neither, could no longer read it — the
+ * same trap as the config file (see `writeConfig`). Any user may hand a file to
+ * a group they belong to, and `service init` made the admin a member of
+ * `dockup`. Best-effort: if it is refused the state is still written, and the
+ * next run as `dockup` replaces the file with one it owns.
+ */
+const handToStateGroup = async (path: string) => {
+  try {
+    const { gid } = await stat(STATE_DIR);
+    await chown(path, -1, gid);
+  } catch {
+    // Not a member of the directory's group; nothing more we can do here.
+  }
+};
+
+/**
  * Persists the state through a temporary file swapped in with `rename`.
  *
  * The swap matters: the file is typically owned by the `dockup` service account
@@ -167,6 +187,7 @@ export const writeState = (state: DockupState): Effect.Effect<void, StatePersist
       try {
         await Bun.write(temporary, JSON.stringify(prune(state, new Date()), null, 2));
         await chmod(temporary, STATE_FILE_MODE);
+        await handToStateGroup(temporary);
         await rename(temporary, STATE_PATH);
       } catch (error) {
         try {
